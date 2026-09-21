@@ -95,28 +95,24 @@ broadcast(new \App\Events\OrderUpdated($order->id, 'paid'));
 npm install socket.io-client
 ```
 
-The default authentication flow uses your Laravel login session. Add these tags to the Blade layout:
+Connect to your gateway and request connection tickets from your Laravel API. Replace the example URLs with your own.
 
-```blade
-<meta name="csrf-token" content="{{ csrf_token() }}">
-<meta name="socket-bridge-url" content="{{ config('socket-bridge.gateway.public_url') }}">
-```
-
-In your frontend entry point, connect and subscribe to an order the signed-in user can access:
+The example uses `authHeaders` from your application's existing login flow. With the default Laravel session authentication, include the current CSRF token as `X-CSRF-TOKEN`; for bearer authentication, use an `Authorization` header and [configure the matching Laravel guard](docs/EXAMPLES.md#sanctum-bearer-authentication).
 
 ```js
 import { io } from 'socket.io-client';
 
-const socket = io(document.querySelector('meta[name="socket-bridge-url"]').content, {
+const socket = io('https://realtime.example.com', {
   transports: ['websocket'],
   auth: async done => {
     try {
-      const response = await fetch('/socket-bridge/token', {
+      const response = await fetch('https://api.example.com/socket-bridge/token', {
         method: 'POST',
+        credentials: 'include',
         signal: AbortSignal.timeout(10000),
         headers: {
           Accept: 'application/json',
-          'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').content,
+          ...authHeaders,
         },
       });
       if (!response.ok) throw new Error(`Authentication failed (${response.status})`);
@@ -140,6 +136,8 @@ socket.on('connect_error', error => console.error(error.message));
 ```
 
 Each connection needs a fresh authentication ticket; the `auth` callback requests one on every attempt. The `connect` handler rejoins the channel after reconnect. Reload current application data after an interruption, since missed events are not replayed.
+
+For a separate frontend origin, allow it in Laravel's CORS configuration and `socket-bridge.gateway.origins`. Cookie authentication also requires credentialed CORS requests and cookies configured for your frontend domain.
 
 For long-lived connections, handle `bridge.session` and `session:refresh` as described in [session refresh](docs/SOCKET_IO.md#keep-a-session-alive). See [authentication examples](docs/EXAMPLES.md#sanctum-bearer-authentication) for Sanctum.
 
