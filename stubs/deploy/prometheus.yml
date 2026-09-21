@@ -1,0 +1,19 @@
+# Merge these jobs into your Prometheus scrape_configs.
+# Mount a private token file containing SOCKET_BRIDGE_METRICS_TOKEN.
+scrape_configs:
+  - job_name: socket-bridge-laravel
+    scheme: https
+    metrics_path: /socket-bridge/metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/socket-bridge-token
+    static_configs:
+      - targets: ['app.example.com']
+  - job_name: socket-bridge-gateway
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/socket-bridge-token
+    static_configs:
+      # Scrape each gateway once using its private address.
+      - targets: ['127.0.0.1:6001']

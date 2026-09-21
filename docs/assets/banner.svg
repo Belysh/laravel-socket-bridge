@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
+  <title id="title">Socket Bridge for Laravel</title>
+  <desc id="desc">Laravel handles events and authorization. Redis Streams carries messages. The NestJS gateway delivers them through Socket.IO. Native and Docker installation.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1200" y2="360" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#101827"/>
+      <stop offset="1" stop-color="#162347"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#ffffff" stroke-opacity=".025"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="360" rx="20" fill="url(#background)"/>
+  <rect width="1200" height="360" rx="20" fill="url(#grid)"/>
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif">
+    <text x="56" y="53" fill="#93bfff" font-size="13" font-weight="600" letter-spacing="2.5">REALTIME FOR LARAVEL 13</text>
+    <text x="1144" y="53" text-anchor="end" fill="#a1adc4" font-size="13">Native / Docker</text>
+    <text x="54" y="120" fill="#f8fafc" font-size="56" font-weight="700" letter-spacing="-1.5">Socket Bridge</text>
+    <text x="56" y="160" fill="#c0cbdf" font-size="20">Your Laravel events. Delivered in realtime.</text>
+
+    <g transform="translate(56 216)">
+      <rect width="304" height="88" rx="12" fill="#fb7185" fill-opacity=".06" stroke="#fb7185" stroke-opacity=".38"/>
+      <text x="152" y="35" text-anchor="middle" fill="#fecdd3" font-size="20" font-weight="600">Laravel</text>
+      <text x="152" y="61" text-anchor="middle" fill="#c0cbdf" font-size="14">Events &amp; authorization</text>
+    </g>
+
+    <g transform="translate(448 216)">
+      <rect width="304" height="88" rx="12" fill="#fbbf24" fill-opacity=".055" stroke="#fbbf24" stroke-opacity=".38"/>
+      <text x="152" y="35" text-anchor="middle" fill="#fde68a" font-size="20" font-weight="600">Redis Streams</text>
+      <text x="152" y="61" text-anchor="middle" fill="#c0cbdf" font-size="14">Durable message transport</text>
+    </g>
+
+    <g transform="translate(840 216)">
+      <rect width="304" height="88" rx="12" fill="#60a5fa" fill-opacity=".065" stroke="#60a5fa" stroke-opacity=".38"/>
+      <text x="152" y="35" text-anchor="middle" fill="#bfdbfe" font-size="20" font-weight="600">NestJS</text>
+      <text x="152" y="61" text-anchor="middle" fill="#c0cbdf" font-size="14">Socket.IO gateway</text>
+    </g>
+  </g>
+  <g fill="none" stroke="#7787a6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M382 260h44m-38-6-6 6 6 6m32-12 6 6-6 6"/>
+    <path d="M774 260h44m-38-6-6 6 6 6m32-12 6 6-6 6"/>
+  </g>
+</svg>

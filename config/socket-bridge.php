@@ -1,0 +1,66 @@
+<?php
+
+use Illuminate\Support\Str;
+
+return [
+    'prefix' => env('SOCKET_BRIDGE_PREFIX', 'socket-bridge:'.Str::slug(env('APP_NAME', 'laravel')).':'.env('APP_ENV', 'production').':'.substr(hash('sha256', (string) env('APP_KEY', '')), 0, 12)),
+    'redis_url' => env('SOCKET_BRIDGE_REDIS_URL'),
+    'redis_connection' => env('SOCKET_BRIDGE_REDIS_CONNECTION', 'default'),
+    'broadcast_connection' => 'socketio',
+    'route_prefix' => 'socket-bridge',
+    // For token APIs use ['api', 'auth:sanctum'] and guard 'sanctum'.
+    'middleware' => ['web', 'auth'],
+    'guard' => null,
+    'provider' => null,
+    'internal_secret' => env('SOCKET_BRIDGE_SECRET'),
+    'session_ttl' => 3600,
+    'ticket_ttl' => 60,
+    'room_lease' => 30,
+    'clock_skew' => 30,
+    'max_payload_bytes' => 65536,
+    'command_claim_idle_ms' => 30000,
+    'command_max_attempts' => 5,
+    'outbox_retry_seconds' => 5,
+    'database_connection' => null,
+    'retention' => [
+        'automatic' => true,
+        'streams_seconds' => 86400,
+        'dead_letters_seconds' => 604800,
+        'receipts_seconds' => 604800,
+        'published_outbox_seconds' => 86400,
+    ],
+    'health' => ['ttl_seconds' => 15, 'interval_seconds' => 5],
+    'workers' => [
+        'max_time' => 3600,
+        'memory_mb' => 128,
+    ],
+    'metrics' => [
+        'enabled' => env('SOCKET_BRIDGE_METRICS_ENABLED', (bool) env('SOCKET_BRIDGE_METRICS_TOKEN')),
+        'token' => env('SOCKET_BRIDGE_METRICS_TOKEN'),
+        'ttl_seconds' => 86400,
+    ],
+    'runtime' => ['node_binary' => env('SOCKET_BRIDGE_NODE_BINARY'), 'download' => true],
+    'gateway' => [
+        'host' => env('SOCKET_BRIDGE_HOST', '127.0.0.1'),
+        'port' => (int) env('SOCKET_BRIDGE_PORT', 6001),
+        'tls_cert' => env('SOCKET_BRIDGE_TLS_CERT'),
+        'tls_key' => env('SOCKET_BRIDGE_TLS_KEY'),
+        'public_url' => env('SOCKET_BRIDGE_URL', 'http://localhost:6001'),
+        'laravel_url' => env('SOCKET_BRIDGE_LARAVEL_URL', env('APP_URL', 'http://localhost')),
+        'origins' => array_values(array_filter(explode(',', env('SOCKET_BRIDGE_ORIGINS', env('APP_URL', 'http://localhost'))))),
+        'transports' => ['websocket'],
+        'auth_check_ms' => 15000,
+        'ca_cert' => env('SOCKET_BRIDGE_CA_CERT'),
+        'max_buffered_bytes' => (int) env('SOCKET_BRIDGE_MAX_BUFFERED_BYTES', 1048576),
+        'max_buffered_packets' => (int) env('SOCKET_BRIDGE_MAX_BUFFERED_PACKETS', 1000),
+        'command_ack_timeout_ms' => (int) env('SOCKET_BRIDGE_COMMAND_ACK_TIMEOUT_MS', 30000),
+        'max_pending_command_acks' => (int) env('SOCKET_BRIDGE_MAX_PENDING_COMMAND_ACKS', 32),
+        'max_pending_command_acks_total' => (int) env('SOCKET_BRIDGE_MAX_PENDING_COMMAND_ACKS_TOTAL', 10000),
+    ],
+    'install' => [
+        'mode' => env('SOCKET_BRIDGE_MODE', 'native'),
+        'profile' => env('SOCKET_BRIDGE_PROFILE', 'auto'),
+        'network' => env('SOCKET_BRIDGE_DOCKER_NETWORK'),
+        'app_url' => env('SOCKET_BRIDGE_APP_URL', env('APP_URL', 'http://localhost')),
+    ],
+];

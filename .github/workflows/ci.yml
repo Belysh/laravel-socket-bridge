@@ -1,0 +1,255 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  tests:
+    name: PHP ${{ matrix.php }} / real databases / Native E2E
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.3', '8.4']
+    services:
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 16389:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_DATABASE: bridge
+          MYSQL_ROOT_PASSWORD: bridge-test
+          MYSQL_ROOT_HOST: '%'
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -pbridge-test --silent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: bridge
+          POSTGRES_USER: bridge
+          POSTGRES_PASSWORD: bridge-test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bridge -d bridge"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      SOCKET_BRIDGE_TEST_REDIS_URL: redis://127.0.0.1:16389/0
+      SOCKET_BRIDGE_TEST_DOCKER: '1'
+      SOCKET_BRIDGE_TEST_MYSQL_URL: mysql://root:bridge-test@127.0.0.1:3306/bridge
+      SOCKET_BRIDGE_TEST_PGSQL_URL: pgsql://bridge:bridge-test@127.0.0.1:5432/bridge
+      SOCKET_BRIDGE_E2E_DOCTOR: '1'
+      SOCKET_BRIDGE_E2E_SOURCE: archive
+      SOCKET_BRIDGE_E2E_APP: ${{ github.workspace }}/.test-results/archive-app
+      SOCKET_BRIDGE_E2E_PREFIX: socket-bridge:e2e:archive
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: mbstring, pdo_sqlite, pdo_mysql, pdo_pgsql, redis, pcntl, zip
+          coverage: none
+          tools: composer:v2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            gateway/package-lock.json
+      - name: Select test runtimes
+        run: |
+          echo "SOCKET_BRIDGE_TEST_NODE_BINARY=$(command -v node)" >> "$GITHUB_ENV"
+          echo "PHP_BINARY=$(command -v php)" >> "$GITHUB_ENV"
+          mkdir -p .test-results
+      - run: composer validate --strict
+      - run: composer install --no-interaction --prefer-dist
+      - run: npm ci --prefix gateway
+      - run: npm run build --prefix gateway
+      - name: Check committed gateway is reproducible from the lockfile
+        run: git diff --exit-code -- runtime/gateway.cjs
+      - name: Audit runtime dependencies
+        run: |
+          composer audit --locked --no-dev
+          npm audit --omit=dev --prefix gateway
+      - name: Gateway integration and lifecycle tests
+        run: npm test --prefix gateway
+      - name: PHP suite with SQLite, MySQL 8, PostgreSQL 16 and real Redis
+        run: php vendor/bin/phpunit --fail-on-skipped --log-junit .test-results/phpunit.xml
+      - name: PhpRedis transport and maintenance compatibility
+        env:
+          SOCKET_BRIDGE_TEST_REDIS_CLIENT: phpredis
+        run: php vendor/bin/phpunit --filter 'RedisStreamsTest|OperationsTest' --fail-on-skipped --log-junit .test-results/phpredis.xml
+      - name: Build and inspect Composer release archive
+        run: php scripts/build-release.php
+      - name: Install release archive into an independent Laravel 13 application
+        run: php scripts/setup-e2e.php
+      - name: Native end-to-end flow and operational doctor
+        run: node scripts/e2e.mjs
+      - name: Preserve reports and fixture logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-php-${{ matrix.php }}-reports
+          retention-days: 7
+          include-hidden-files: true
+          if-no-files-found: ignore
+          path: |
+            .test-results/phpunit.xml
+            .test-results/phpredis.xml
+            .test-results/e2e-*.log
+            .test-results/archive-app/storage/logs/*.log
+
+  docker:
+    name: Docker gateway / generated Redis / Laravel E2E
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 16389:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, pdo_sqlite, redis, pcntl, zip
+          coverage: none
+          tools: composer:v2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            gateway/package-lock.json
+      - name: Verify Docker Compose
+        run: docker compose version
+      - run: composer install --no-interaction --prefer-dist
+      - run: npm ci --prefix gateway
+      - run: npm run build --prefix gateway
+      - name: Full Docker installer, generated persistent Redis and operational doctor
+        run: php scripts/docker-e2e.php
+      - name: Capture container state on failure
+        if: failure()
+        run: |
+          mkdir -p .test-results
+          docker ps -a > .test-results/docker-containers.log
+      - name: Preserve Docker integration logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: docker-e2e-reports
+          retention-days: 7
+          include-hidden-files: true
+          if-no-files-found: ignore
+          path: |
+            .test-results/e2e-docker-*.log
+            .test-results/docker-containers.log
+            .test-results/docker-app/storage/logs/*.log
+
+  recovery:
+    name: 300 connections / bounded recovery soak
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    services:
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 16389:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      SOCKET_BRIDGE_TEST_REDIS_URL: redis://127.0.0.1:16389/0
+      SOCKET_BRIDGE_SOAK_DURATION_MS: '125000'
+      SOCKET_BRIDGE_SOAK_CONNECTIONS: '300'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            gateway/package-lock.json
+      - run: npm ci --prefix gateway
+      - run: npm run build --prefix gateway
+      - name: Recover after authorization outage, Redis interruption and mass reconnect
+        run: |
+          mkdir -p .test-results
+          npm run test:soak --prefix gateway 2>&1 | tee .test-results/gateway-soak.log
+      - name: Evict a paused TCP reader while preserving healthy delivery
+        run: node scripts/scale-soak-pressure.mjs
+      - name: Preserve measurements and recovery logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gateway-recovery-soak
+          retention-days: 14
+          include-hidden-files: true
+          if-no-files-found: ignore
+          path: |
+            .test-results/gateway-soak.json
+            .test-results/gateway-soak.log
+            .test-results/scale-pressure.json
+
+  deploy-templates:
+    name: Production templates / TLS WebSocket proxy checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            gateway/package-lock.json
+      - run: npm ci --prefix gateway
+      - name: Validate service/scrape templates and real TLS proxy traffic
+        run: node scripts/check-deploy-templates.mjs
+      - name: Preserve bounded validation summary (no private test certificates)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: deploy-template-report
+          retention-days: 7
+          include-hidden-files: true
+          if-no-files-found: ignore
+          path: .test-results/deploy-templates.json

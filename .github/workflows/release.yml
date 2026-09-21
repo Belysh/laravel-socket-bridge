@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: '8.3'
+          extensions: zip
+          coverage: none
+          tools: composer:v2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: Validate matching stable release versions
+        run: |
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          const tag = process.env.RELEASE_TAG;
+          if (!/^v\d+\.\d+\.\d+$/.test(tag)) throw new Error('Expected a stable vX.Y.Z tag');
+          for (const file of ['gateway/package.json', 'runtime/manifest.json']) {
+            const data = JSON.parse(readFileSync(file));
+            if ((data.version ?? data.package_version) !== tag.slice(1)) throw new Error(`Version mismatch: ${file}`);
+          }
+          JS
+      - run: composer install --no-interaction --prefer-dist
+      - run: npm ci --prefix gateway
+      - run: npm run build --prefix gateway
+      - run: git diff --exit-code -- runtime/gateway.cjs
+      - run: php scripts/build-release.php
+      - name: Publish matching GitHub release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --verify-tag --title "Socket Bridge ${RELEASE_TAG}" --generate-notes \
+            ".test-results/release/laravel-socket-bridge-${RELEASE_TAG#v}.zip" \
+            .test-results/release/SHA256SUMS

@@ -1,0 +1,79 @@
+name: Extended scaling validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: Run duration in minutes (120–150)
+        type: number
+        default: 120
+        required: true
+      connections:
+        description: Concurrent sockets (50–1000)
+        type: number
+        default: 500
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      MINUTES: ${{ inputs.minutes }}
+      CONNECTIONS: ${{ inputs.connections }}
+      SOCKET_BRIDGE_E2E_APP: ${{ github.workspace }}/.test-results/scale-app
+      SOCKET_BRIDGE_SCALE_PHP_METRICS: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: '8.3'
+          extensions: pdo_pgsql, pdo_sqlite, mbstring, pcntl, zip
+          coverage: none
+          tools: composer:v2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: Validate inputs
+        run: |
+          node --input-type=module <<'JS'
+          import { appendFileSync } from 'node:fs';
+          const minutes = Number(process.env.MINUTES), connections = Number(process.env.CONNECTIONS);
+          if (!Number.isInteger(minutes) || minutes < 120 || minutes > 150) throw new Error('Expected 120–150 minutes');
+          if (!Number.isInteger(connections) || connections < 50 || connections > 1000) throw new Error('Expected 50–1000 sockets');
+          appendFileSync(process.env.GITHUB_ENV, `SOCKET_BRIDGE_SCALE_DURATION_MS=${minutes * 60000}\nSOCKET_BRIDGE_SCALE_CONNECTIONS=${connections}\nSOCKET_BRIDGE_TEST_NODE_BINARY=${process.execPath}\n`);
+          JS
+      - run: composer install --no-interaction --prefer-dist
+      - run: npm ci --prefix gateway
+      - run: npm run build --prefix gateway
+      - run: php scripts/setup-e2e.php
+      - name: Run multiple gateways and workers through repeated faults
+        run: node scripts/scale-soak.mjs
+      - name: Check retained heap of uninterrupted gateway processes
+        run: |
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { spawnSync } from 'node:child_process';
+          const { directory } = JSON.parse(readFileSync('.test-results/scale-current.json', 'utf8'));
+          const result = spawnSync(process.execPath, ['scripts/scale-soak-analyze.mjs', directory], { stdio: 'inherit' });
+          if (result.error) throw result.error;
+          process.exit(result.status ?? 1);
+          JS
+      - name: Preserve bounded reports and process logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scale-recovery-reports
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: ignore
+          path: |
+            .test-results/scale-*/report.json
+            .test-results/scale-*/analysis.json
+            .test-results/scale-*/gateway-samples.jsonl
+            .test-results/scale-*/snapshot-manifest.json
+            .test-results/scale-*/php-metrics.prom
+            .test-results/scale-*/*.log

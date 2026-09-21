@@ -1,0 +1,22 @@
+[Unit]
+Description=Socket Bridge outbox worker %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/srv/app/current
+ExecStart=/usr/bin/php artisan socket-bridge:outbox --max-time=3600 --memory=128
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+KillMode=control-group
+TimeoutStopSec=120
+NoNewPrivileges=true
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

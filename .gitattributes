@@ -1,0 +1,11 @@
+* text=auto eol=lf
+/.github export-ignore
+/tests export-ignore
+/gateway/test export-ignore
+/.test-results export-ignore
+/composer.lock export-ignore
+/gateway export-ignore
+/scripts export-ignore
+/phpunit.xml export-ignore
+/runtime/gateway.cjs linguist-generated=true -whitespace
+/runtime/THIRD_PARTY_LICENSES.txt -whitespace

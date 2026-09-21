@@ -1,0 +1,22 @@
+<?php
+
+namespace {{ namespace }};
+
+use Illuminate\Support\Facades\Validator;
+use SocketBridge\Commands\CommandContext;
+use SocketBridge\Contracts\CommandHandler;
+
+final class {{ class }} implements CommandHandler
+{
+    public function handle(array $payload, CommandContext $context): array
+    {
+        $data = Validator::make($payload, [
+            // Define the input rules for this command.
+        ])->validate();
+
+        // Authorize using $context->user, then mutate your database.
+        // The consumer already wraps this handler in its database transaction.
+        // Publish transactional events with Socket::durable().
+        return $data;
+    }
+}

@@ -1,0 +1,9 @@
+# DNS must resolve this hostname to the server for automatic TLS.
+realtime.example.com {
+    handle /socket.io/* {
+        reverse_proxy 127.0.0.1:6001
+    }
+    handle {
+        respond 404
+    }
+}

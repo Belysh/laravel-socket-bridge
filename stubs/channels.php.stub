@@ -1,0 +1,9 @@
+<?php
+
+use Illuminate\Support\Facades\Broadcast;
+
+// Use PrivateChannel('users.'.$id) or socket.join('private-users.' + id).
+// Keep project authorization here; the gateway delegates channel permissions to Laravel.
+Broadcast::channel('users.{id}', static function ($user, string $id): bool {
+    return (string) $user->getAuthIdentifier() === $id;
+});

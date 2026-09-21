@@ -1,0 +1,23 @@
+<?php
+
+namespace App\Events;
+
+use Illuminate\Broadcasting\PrivateChannel;
+use Illuminate\Broadcasting\InteractsWithSockets;
+use Illuminate\Contracts\Broadcasting\ShouldBroadcast;
+use Illuminate\Contracts\Events\ShouldDispatchAfterCommit;
+use Illuminate\Foundation\Events\Dispatchable;
+use Illuminate\Queue\SerializesModels;
+
+// Register Broadcast::channel('users.{id}', fn ($user, $id) => (string) $user->getAuthIdentifier() === $id).
+final class SocketBridgeExample implements ShouldBroadcast, ShouldDispatchAfterCommit
+{
+    use Dispatchable, InteractsWithSockets, SerializesModels;
+
+    public function __construct(public readonly string $userId, public readonly string $message) {}
+
+    public function broadcastConnections(): array { return ['socketio']; }
+    public function broadcastOn(): array { return [new PrivateChannel('users.'.$this->userId)]; }
+    public function broadcastAs(): string { return 'example.updated'; }
+    public function broadcastWith(): array { return ['message' => $this->message]; }
+}

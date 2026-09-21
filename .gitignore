@@ -1,0 +1,14 @@
+/vendor/
+/node_modules/
+/gateway/node_modules/
+/gateway/dist/
+/.phpunit.cache/
+/coverage/
+/.env
+/.env.*
+!/.env.example
+!/examples/.env.example
+/.runtime/
+/.test-results/
+/tests/Fixtures/app/storage/
+.DS_Store
