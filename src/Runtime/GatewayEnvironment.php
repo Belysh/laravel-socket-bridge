@@ -63,6 +63,7 @@ final class GatewayEnvironment
         ];
         $environment['SOCKET_BRIDGE_PUBLIC_URL'] = (string) $this->config->get('socket-bridge.gateway.public_url', 'http://localhost:'.$port);
         foreach ([
+            'presence_reconcile_ms' => ['SOCKET_BRIDGE_PRESENCE_RECONCILE_MS', 30000, 100, 300000],
             'max_buffered_bytes' => ['SOCKET_BRIDGE_MAX_BUFFERED_BYTES', 1048576, 65536, 67108864],
             'max_buffered_packets' => ['SOCKET_BRIDGE_MAX_BUFFERED_PACKETS', 1000, 10, 100000],
             'command_ack_timeout_ms' => ['SOCKET_BRIDGE_COMMAND_ACK_TIMEOUT_MS', 30000, 100, 300000],

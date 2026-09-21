@@ -3,6 +3,7 @@
 namespace SocketBridge\Outbox;
 
 use SocketBridge\Contracts\EnvelopeTransport;
+use SocketBridge\DTO\Json;
 use SocketBridge\Operations\Metrics;
 use Throwable;
 
@@ -29,7 +30,7 @@ class OutboxRelay
                     return 0;
                 }
                 try {
-                    $this->transport->add('events', json_decode($row->envelope, true, 512, JSON_THROW_ON_ERROR));
+                    $this->transport->add('events', Json::decodeEnvelope($row->envelope, legacyOutbox: true));
                     $query->update(['published_at' => now(), 'attempts' => $row->attempts + 1, 'last_error' => null, 'updated_at' => now()]);
                     $lag = max(0, now()->parse($row->created_at)->diffInSeconds(now()));
 

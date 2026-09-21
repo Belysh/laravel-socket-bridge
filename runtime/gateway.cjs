@@ -100,6 +100,7 @@ var require_config = __commonJS({
         instanceId: env.SOCKET_BRIDGE_INSTANCE_ID ?? (0, node_crypto_1.randomUUID)(),
         claimIdleMs: integer(env, "SOCKET_BRIDGE_CLAIM_IDLE_MS", 3e4, 100, 36e5),
         authCheckMs: integer(env, "SOCKET_BRIDGE_AUTH_CHECK_MS", 15e3, 100, 6e4),
+        presenceReconcileMs: integer(env, "SOCKET_BRIDGE_PRESENCE_RECONCILE_MS", 3e4, 100, 3e5),
         roomLeaseSeconds: integer(env, "SOCKET_BRIDGE_ROOM_LEASE_SECONDS", 30, 1, 300),
         authTimeoutMs: integer(env, "SOCKET_BRIDGE_AUTH_TIMEOUT_MS", 5e3, 100, 3e4),
         maxPayloadBytes: integer(env, "SOCKET_BRIDGE_MAX_PAYLOAD_BYTES", 65536, 1024, 1048576),
@@ -113632,12 +113633,19 @@ var require_runtime = __commonJS({
       timer;
       renewing = 0;
       heartbeatTimer;
-      metrics = { connected: 0, disconnected: 0, refreshes: 0, renewals: 0, authorization_retries: 0, revoked: 0, commands_accepted: 0, events_accepted: 0, events_delivered: 0, events_failed: 0, events_duplicates: 0, events_retries: 0, slow_clients: 0 };
+      presenceTimer;
+      reconcilingPresence = false;
+      presenceCursor = 0;
+      metrics = { connected: 0, disconnected: 0, refreshes: 0, renewals: 0, authorization_retries: 0, revoked: 0, commands_accepted: 0, command_acks_completed: 0, command_acks_errors: 0, command_acks_timeouts: 0, command_acks_disconnected: 0, events_accepted: 0, events_delivered: 0, events_failed: 0, events_duplicates: 0, events_retries: 0, slow_clients: 0 };
       observedEvents = /* @__PURE__ */ new Set();
       latencyBounds = [1e-3, 5e-3, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 5];
       latencyBuckets = new Array(10).fill(0);
       latencyCount = 0;
       latencySum = 0;
+      ackLatencyBounds = [...this.latencyBounds, 10, 30, 60, 300];
+      ackLatencyBuckets = new Array(14).fill(0);
+      ackLatencyCount = 0;
+      ackLatencySum = 0;
       checkingSessions = false;
       claimCursor = "0-0";
       revisionSequence = 0;
@@ -113724,6 +113732,8 @@ var require_runtime = __commonJS({
         await this.heartbeat();
         this.heartbeatTimer = setInterval(() => void this.heartbeat(), 5e3);
         this.heartbeatTimer.unref();
+        this.presenceTimer = setInterval(() => void this.reconcilePresence(), this.config.presenceReconcileMs);
+        this.presenceTimer.unref();
       }
       async group() {
         try {
@@ -113801,9 +113811,11 @@ var require_runtime = __commonJS({
         socket.on("disconnect", () => {
           this.metrics.disconnected++;
           const local = this.state.get(socket.id);
-          if (local)
+          if (local) {
             for (const [id, pending] of local.pending)
-              this.removePending(local, id, pending);
+              if (this.removePending(local, id, pending))
+                this.metrics.command_acks_disconnected++;
+          }
           this.state.delete(socket.id);
           if (!this.stopping && local) {
             for (const channel of local.leases.keys())
@@ -113897,6 +113909,13 @@ ${body}`).digest("hex");
             socket.data.presence[channel] = grant.member;
           if (grant.member)
             await this.presence(channel);
+        } catch (error) {
+          if (local.revisions.get(channel) === revision && local.leases.has(channel) && error instanceof protocol_1.BridgeError && ["forbidden", "unauthenticated", "session_expired"].includes(error.code)) {
+            await this.leave(socket, channel).catch(() => void 0);
+            if (socket.connected)
+              socket.emit("bridge.subscription.revoked", { channel, error: (0, protocol_1.failure)(error) });
+          }
+          throw error;
         } finally {
           if (!local.leases.has(channel) && local.revisions.get(channel) === revision)
             local.revisions.delete(channel);
@@ -113929,17 +113948,61 @@ ${body}`).digest("hex");
         }
         this.io.to((0, protocol_1.channelRoom)(channel)).emit("bridge.presence", { channel, members: [...members.values()].sort((a, b) => a.id.localeCompare(b.id)) });
       }
+      async reconcilePresence() {
+        if (this.stopping || this.reconcilingPresence || this.clients().some((client) => client.status !== "ready"))
+          return;
+        this.reconcilingPresence = true;
+        try {
+          const channels = /* @__PURE__ */ new Set();
+          for (const local of this.state.values())
+            for (const [channel, lease] of local.leases) {
+              if (!lease.suspended && channel.startsWith("presence-"))
+                channels.add(channel);
+            }
+          const all = [...channels].sort();
+          if (!all.length) {
+            this.presenceCursor = 0;
+            return;
+          }
+          const batch = Array.from({ length: Math.min(100, all.length) }, (_, index) => all[(this.presenceCursor + index) % all.length]);
+          this.presenceCursor = (this.presenceCursor + batch.length) % all.length;
+          let next = 0;
+          await Promise.all(Array.from({ length: Math.min(4, batch.length) }, async () => {
+            while (!this.stopping && next < batch.length) {
+              const channel = batch[next++];
+              await this.presence(channel).catch(() => void 0);
+            }
+          }));
+        } finally {
+          this.reconcilingPresence = false;
+        }
+      }
       namedCommand(socket, name, args) {
+        const started = performance.now();
         const callback = typeof args.at(-1) === "function" ? args.pop() : void 0;
         const payload = args[0], options = args[1];
         const id = (0, protocol_1.object)(options) && (0, protocol_1.validId)(options.id) ? options.id.toLowerCase() : (0, node_crypto_1.randomUUID)();
-        let responded = false;
+        let responded = false, timedOut = false;
         const respond = (value) => {
-          if (!responded) {
-            responded = true;
-            if (socket.connected)
-              callback?.(value);
-          }
+          if (responded)
+            return;
+          responded = true;
+          if (!callback || !socket.connected)
+            return;
+          if ((0, protocol_1.object)(value) && value.ok === true)
+            this.metrics.command_acks_completed++;
+          else if (timedOut)
+            this.metrics.command_acks_timeouts++;
+          else
+            this.metrics.command_acks_errors++;
+          const elapsed = (performance.now() - started) / 1e3;
+          this.ackLatencyCount++;
+          this.ackLatencySum += elapsed;
+          this.ackLatencyBounds.forEach((bound, index) => {
+            if (elapsed <= bound)
+              this.ackLatencyBuckets[index]++;
+          });
+          callback(value);
         };
         void this.clientRequest(socket, { command: name, payload, options }, async () => {
           if (!(0, protocol_1.validCommand)(name) || !(0, protocol_1.object)(payload) || args.length < 1 || args.length > 2 || options !== void 0 && (!(0, protocol_1.object)(options) || !(0, protocol_1.validId)(options.id) || Object.keys(options).some((key) => key !== "id")))
@@ -113957,8 +114020,10 @@ ${body}`).digest("hex");
           let pending;
           if (callback) {
             const timer = setTimeout(() => {
-              if (pending && this.removePending(local, id, pending))
+              if (pending && this.removePending(local, id, pending)) {
+                timedOut = true;
                 respond({ ok: false, id, error: { code: "command.timeout", message: "Command outcome is unknown. Retry the same id and input; execution is not cancelled." } });
+              }
             }, this.config.commandAckTimeoutMs);
             timer.unref();
             pending = { requestId, respond, timer };
@@ -114032,22 +114097,34 @@ ${body}`).digest("hex");
           for (const lease of local.leases.values())
             if (!lease.suspended)
               subscriptions++;
-        return { connections: this.state.size, subscriptions, pending_acks: this.pendingAckCount, counters: { ...this.metrics }, latency: { bounds: [...this.latencyBounds], buckets: [...this.latencyBuckets], count: this.latencyCount, sum: this.latencySum }, memory: process.memoryUsage() };
+        return { connections: this.state.size, subscriptions, pending_acks: this.pendingAckCount, counters: { ...this.metrics }, latency: { bounds: [...this.latencyBounds], buckets: [...this.latencyBuckets], count: this.latencyCount, sum: this.latencySum }, command_ack_latency: { bounds: [...this.ackLatencyBounds], buckets: [...this.ackLatencyBuckets], count: this.ackLatencyCount, sum: this.ackLatencySum }, memory: process.memoryUsage() };
       }
       prometheus() {
         const snapshot = this.snapshot();
         const lines = [];
-        const metric = (name2, kind, help, value) => lines.push(`# HELP ${name2} ${help}`, `# TYPE ${name2} ${kind}`, `${name2} ${value}`);
+        const metric = (name2, kind, help2, value) => lines.push(`# HELP ${name2} ${help2}`, `# TYPE ${name2} ${kind}`, `${name2} ${value}`);
+        const help = {
+          events_delivered: "Successful gateway dispatches; not acknowledgements from browsers.",
+          command_acks_completed: "Successful business callbacks dispatched; not confirmed browser receipt.",
+          command_acks_errors: "Error callbacks dispatched, including admission and publication failures; excludes gateway ACK timeouts.",
+          command_acks_timeouts: "Callbacks dispatched when the gateway ACK deadline expired; command outcome remains unknown.",
+          command_acks_disconnected: "Pending callbacks abandoned on disconnect, including gateway shutdown; command execution is not cancelled."
+        };
         for (const [name2, value] of Object.entries(this.metrics))
-          metric(`socket_bridge_gateway_${name2}_total`, "counter", name2 === "events_delivered" ? "Successful gateway dispatches; not acknowledgements from browsers." : `Process-local ${name2.replaceAll("_", " ")} count.`, value);
+          metric(`socket_bridge_gateway_${name2}_total`, "counter", help[name2] ?? `Process-local ${name2.replaceAll("_", " ")} count.`, value);
         metric("socket_bridge_gateway_connections", "gauge", "Current connected sockets.", Number(snapshot.connections));
         metric("socket_bridge_gateway_subscriptions", "gauge", "Current unexpired channel grants.", Number(snapshot.subscriptions));
+        metric("socket_bridge_gateway_pending_acks", "gauge", "Pending business command callbacks on connected sockets.", this.pendingAckCount);
         metric("socket_bridge_gateway_heap_bytes", "gauge", "Current V8 heap usage.", process.memoryUsage().heapUsed);
         metric("socket_bridge_gateway_rss_bytes", "gauge", "Current process resident memory.", process.memoryUsage().rss);
         const name = "socket_bridge_gateway_processing_seconds";
         lines.push(`# HELP ${name} Stream-entry processing duration including Redis acknowledgement.`, `# TYPE ${name} histogram`);
         this.latencyBounds.forEach((bound, index) => lines.push(`${name}_bucket{le="${bound}"} ${this.latencyBuckets[index]}`));
         lines.push(`${name}_bucket{le="+Inf"} ${this.latencyCount}`, `${name}_sum ${this.latencySum}`, `${name}_count ${this.latencyCount}`);
+        const ackName = "socket_bridge_gateway_command_ack_seconds";
+        lines.push(`# HELP ${ackName} Named-event receipt to callback dispatch, including validation, queue wait and business processing; not browser receipt. Disconnected callbacks are excluded.`, `# TYPE ${ackName} histogram`);
+        this.ackLatencyBounds.forEach((bound, index) => lines.push(`${ackName}_bucket{le="${bound}"} ${this.ackLatencyBuckets[index]}`));
+        lines.push(`${ackName}_bucket{le="+Inf"} ${this.ackLatencyCount}`, `${ackName}_sum ${this.ackLatencySum}`, `${ackName}_count ${this.ackLatencyCount}`);
         return lines.join("\n") + "\n";
       }
       buffered(socket) {
@@ -114351,6 +114428,8 @@ ${body}`).digest("hex");
           clearInterval(this.timer);
         if (this.heartbeatTimer)
           clearInterval(this.heartbeatTimer);
+        if (this.presenceTimer)
+          clearInterval(this.presenceTimer);
         await this.redis.del(this.key(`health:gateway:${this.config.instanceId}`)).catch(() => void 0);
         this.reader.disconnect();
         await this.consuming;
@@ -114490,7 +114569,7 @@ var config_1 = require_config();
 var app_1 = require_app();
 async function main() {
   if (process.argv.includes("--version")) {
-    process.stdout.write("socket-bridge-gateway 2.0.0 protocol/1\n");
+    process.stdout.write("socket-bridge-gateway 2.1.0 protocol/1\n");
     return;
   }
   if (Number(process.versions.node.split(".")[0]) !== 24)

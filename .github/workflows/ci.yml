@@ -96,7 +96,7 @@ jobs:
       - run: npm ci --prefix gateway
       - run: npm run build --prefix gateway
       - name: Check committed gateway is reproducible from the lockfile
-        run: git diff --exit-code -- runtime/gateway.cjs
+        run: git diff --exit-code -- runtime/gateway.cjs runtime/probe.cjs
       - name: Audit runtime dependencies
         run: |
           composer audit --locked --no-dev
@@ -108,7 +108,7 @@ jobs:
       - name: PhpRedis transport and maintenance compatibility
         env:
           SOCKET_BRIDGE_TEST_REDIS_CLIENT: phpredis
-        run: php vendor/bin/phpunit --filter 'RedisStreamsTest|OperationsTest' --fail-on-skipped --log-junit .test-results/phpredis.xml
+        run: php vendor/bin/phpunit --filter 'RedisStreamsTest|OperationsTest|CleanupTest' --fail-on-skipped --log-junit .test-results/phpredis.xml
       - name: Build and inspect Composer release archive
         run: php scripts/build-release.php
       - name: Install release archive into an independent Laravel 13 application

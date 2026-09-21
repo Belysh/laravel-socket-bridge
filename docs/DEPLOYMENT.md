@@ -43,7 +43,7 @@ The restart generation is stored persistently in the application's Redis namespa
 
 The namespace (`SOCKET_BRIDGE_PREFIX`), Redis connection/database and internal secret must match across replicas of one application. Use distinct namespaces/secrets for different applications. Redis must be a trusted private service; its credentials grant transport authority. Do not expose Redis to browsers or the public internet.
 
-Run Laravel's scheduler (`php artisan schedule:work` locally, the standard scheduler cron in production). The package registers hourly `socket-bridge:prune --no-interaction` with overlap protection. Disable registration via `retention.automatic=false` if you schedule maintenance elsewhere.
+Run Laravel's scheduler (`php artisan schedule:work` locally, the standard scheduler cron in production). The package registers `socket-bridge:prune --no-interaction` every minute with overlap protection. Disable registration via `retention.automatic=false` if you schedule maintenance elsewhere.
 
 | Retention setting | Default | Protects |
 | --- | --- | --- |
@@ -52,7 +52,7 @@ Run Laravel's scheduler (`php artisan schedule:work` locally, the standard sched
 | `receipts_seconds` | 604800 | Incomplete receipts and unpublished result outbox rows |
 | `dead_letters_seconds` | 604800 | Failed records remain inspectable until this cutoff |
 
-These are age thresholds, not hard memory limits. A stalled group deliberately prevents unsafe trimming. `prune --limit=1000` bounds a pass; adjust scheduling for your volume. The receipt retention period defines the deduplication window. An old ID retried after its receipt is removed can represent new work; application idempotency is needed beyond that window.
+These are age thresholds, not hard memory limits. A stalled group deliberately prevents unsafe trimming. Each run scans up to 10,000 records per resource in batches of 100, with a ten-second cooperative time budget. Configure `SOCKET_BRIDGE_PRUNE_FREQUENCY_MINUTES`, `SOCKET_BRIDGE_PRUNE_LIMIT`, `SOCKET_BRIDGE_PRUNE_BATCH_SIZE` and `SOCKET_BRIDGE_PRUNE_MAX_SECONDS` to match your volume; see [cleanup budgets and progress](RELIABILITY.md#retention-and-pruning). The receipt retention period defines the deduplication window. An old ID retried after its receipt is removed can represent new work; application idempotency is needed beyond that window.
 
 ```bash
 php artisan socket-bridge:doctor --probe --operational
@@ -64,13 +64,15 @@ php artisan socket-bridge:failed commands --replay=REDIS_ENTRY_ID
 
 Status reports gateway and both PHP worker heartbeats, each expiring after 15 seconds by default, plus stream lag/pending, dead letters and oldest outbox age. `healthy` means those processes have live heartbeats; use the reported queue metrics for your own latency/backlog alert thresholds. A busy long-running handler can exceed the heartbeat TTL; keep operations bounded or increase the health timeout with care. Readiness alone is not proof of business processing.
 
+The `cleanup` section reports the last real cleanup run: records scanned/deleted, remaining candidates, retention lag and work protected from removal. Dry runs leave this snapshot unchanged. Alert when its completion timestamp stops advancing, its time budget is repeatedly exhausted, or retention lag keeps growing. Protected work requires recovering its consumers or outbox publication before it can be removed.
+
 ## Metrics and latency
 
 Set a separate random `SOCKET_BRIDGE_METRICS_TOKEN` of at least 32 characters to enable protected metrics, synchronize Docker configuration when applicable, then restart processes. The Laravel endpoint is `GET /socket-bridge/metrics` (under the configured route prefix); each gateway exposes `GET /metrics`. Send `Authorization: Bearer <token>`. Without configuration these HTTP routes return 404. Use HTTPS or a trusted private monitoring network. Do not reuse the internal bridge secret. The reverse-proxy templates expose only Socket.IO; route gateway metrics privately.
 
 `php artisan socket-bridge:metrics` prints the Laravel exporter locally. To collect counters without enabling its HTTP endpoint, set `SOCKET_BRIDGE_METRICS_ENABLED=true` and leave the token absent. PHP telemetry errors do not fail command processing or roll back outbox work.
 
-The PHP exporter includes processed/failed/retried/dead-letter command counters, published/failed outbox counters, `command_duration_seconds` and `outbox_lag_seconds` histograms, worker/gateway counts and backlog gauges. Histograms use cumulative buckets from 5 ms to 60 seconds plus infinity. Duration covers one processing attempt including receipt lookup and acknowledgement; outbox lag is creation-to-successful-publication age. Counters describe observed attempts and may undercount during telemetry outages or count receipt replays; use business tables for accounting.
+The PHP exporter includes processed/failed/retried/dead-letter command counters, published/failed outbox counters, `command_duration_seconds` and `outbox_lag_seconds` histograms, worker/gateway counts and backlog gauges. Cleanup gauges include `socket_bridge_cleanup_last_run_timestamp_seconds`, `socket_bridge_cleanup_time_limit_reached` and per-resource `socket_bridge_cleanup_deleted`, `socket_bridge_cleanup_has_more` and `socket_bridge_cleanup_retention_lag_seconds`. These describe the last completed real run, not cumulative totals or exact backlog counts. Histograms use cumulative buckets from 5 ms to 60 seconds plus infinity. Duration covers one processing attempt including receipt lookup and acknowledgement; outbox lag is creation-to-successful-publication age. Counters describe observed attempts and may undercount during telemetry outages or count receipt replays; use business tables for accounting.
 
 PHP counters are shared by all workers of a namespace in one Redis hash and expire after 24 hours without updates (`metrics.ttl_seconds`). Scrape the Laravel aggregate **once per namespace**; scraping every PHP replica and summing would double-count. Scrape each gateway separately for its process-local metrics. Avoid user/channel labels. Example PromQL for a five-minute command p95:
 

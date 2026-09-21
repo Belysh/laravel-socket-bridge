@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { once } from 'node:events';
 import { io } from '../gateway/node_modules/socket.io-client/build/esm-debug/index.js';
@@ -66,7 +66,7 @@ async function login(id) {
     return response.json();
   }
   csrf = (await request(`/demo/login/${id}`)).csrf;
-  return { request, token: async () => (await request('/socket-bridge/token', 'POST')).token };
+  return { request, token: async () => (await request('/socket-bridge/token', 'POST')).token, headers: () => ({ Cookie: [...cookies].map(([key, value]) => `${key}=${value}`).join('; '), 'X-CSRF-TOKEN': csrf }) };
 }
 async function connect(session) {
   const socket = io(gateway, { auth: { token: await session.token() }, transports: ['websocket'], autoConnect: false, reconnection: false });
@@ -104,10 +104,32 @@ async function doctor() {
   console.log('PASS doctor signed callback probe + operational gateway/worker heartbeat and backlog checks');
 }
 
+async function roundtripProbe(headers, expectedCode = null) {
+  const path = resolve(app, 'storage', `probe-${crypto.randomUUID()}.json`);
+  await writeFile(path, JSON.stringify(headers), { mode: 0o600 });
+  try {
+    const child = spawn(php, ['artisan', 'socket-bridge:probe', docker ? '--docker' : '--native', `--headers=${path}`, '--timeout=3', '--json'], {
+      cwd: app, env: { ...process.env, SOCKET_BRIDGE_NODE_BINARY: process.execPath }, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let output = '', errors = '';
+    child.stdout.on('data', chunk => { output += chunk; });
+    child.stderr.on('data', chunk => { errors += chunk; });
+    const [code] = await once(child, 'exit');
+    const result = JSON.parse(output);
+    assert.equal(code, expectedCode ? 1 : 0, errors + output);
+    if (expectedCode) assert.equal(result.error.code, expectedCode);
+    else {
+      assert.equal(result.ok, true);
+      assert.equal(result.path, 'http-ticket/socket.io/redis-streams/php/outbox/ack');
+      assert.ok(result.duration_ms > 0);
+    }
+  } finally { await rm(path, { force: true }); }
+}
+
 try {
   start('http', ['-S', `${docker ? '0.0.0.0' : '127.0.0.1'}:${httpPort}`, '-t', 'public', 'public/index.php']);
   start('gateway', ['artisan', 'socket-bridge:start', ...(docker ? ['--docker'] : ['--native', '--no-download'])]);
-  start('commands', ['artisan', 'socket-bridge:consume']);
+  const commandWorker = start('commands', ['artisan', 'socket-bridge:consume']);
   start('outbox', ['artisan', 'socket-bridge:outbox']);
   start('queue', ['artisan', 'queue:work', '--sleep=1', '--tries=1']);
   await ready(`${base}/up`);
@@ -116,6 +138,13 @@ try {
 
   const session = await login(1);
   const other = await login(2);
+  await roundtripProbe({ }, 'probe.ticket_rejected');
+  await roundtripProbe(session.headers());
+  commandWorker.kill('SIGSTOP');
+  try { await roundtripProbe(session.headers(), 'probe.ack_timeout'); }
+  finally { commandWorker.kill('SIGCONT'); }
+  await roundtripProbe(session.headers());
+  console.log('PASS Artisan full roundtrip probe, HTTP authentication rejection, stalled PHP timeout and recovery');
   const first = await connect(session);
   const second = await connect(session);
   const stranger = await connect(other);
@@ -194,6 +223,20 @@ try {
   });
   await assert.rejects(request(first, 'unregistered.command', {}));
   console.log('PASS named command business acknowledgements, correlated results, transactional outbox, idempotence, validation');
+
+  const jsonPayload = { 0: { empty: {}, list: [], numeric: { 0: 'zero' }, nested: [{}, [], { 1: 'one', 0: 'zero' }] }, 1: 'second' };
+  const jsonId = crypto.randomUUID();
+  const jsonEvent = event(second, 'demo.json.echoed');
+  assert.deepEqual((await request(first, 'demo.json.echo', jsonPayload, { id: jsonId })).data, jsonPayload);
+  assert.deepEqual((await jsonEvent)[0], jsonPayload);
+  assert.deepEqual((await request(first, 'demo.json.echo', jsonPayload, { id: jsonId })).data, jsonPayload);
+  for (const changed of [
+    { ...jsonPayload, 0: { ...jsonPayload[0], empty: [] } },
+    { ...jsonPayload, 0: { ...jsonPayload[0], numeric: ['zero'] } },
+  ]) {
+    await assert.rejects(request(first, 'demo.json.echo', changed, { id: jsonId }), error => error.code === 'command.id_conflict');
+  }
+  console.log('PASS JSON numeric-key objects, nested empty objects/lists, durable event, retained ACK and shape conflict');
 
   first.disconnect();
   first.auth = { token: await session.token() };

@@ -16,6 +16,7 @@ use SocketBridge\Broadcasters\SocketIoBroadcaster;
 use SocketBridge\Commands\CommandConsumer;
 use SocketBridge\Commands\CommandProcessor;
 use SocketBridge\Commands\CommandRegistry;
+use SocketBridge\Commands\ProbeHandler;
 use SocketBridge\Console\ConfigureCommand;
 use SocketBridge\Console\ConsumeCommand;
 use SocketBridge\Console\DevCommand;
@@ -26,6 +27,7 @@ use SocketBridge\Console\MakeCommandHandlerCommand;
 use SocketBridge\Console\MetricsCommand;
 use SocketBridge\Console\OutboxCommand;
 use SocketBridge\Console\PruneCommand;
+use SocketBridge\Console\ProbeCommand;
 use SocketBridge\Console\RestartCommand;
 use SocketBridge\Console\StartCommand;
 use SocketBridge\Console\StatusCommand;
@@ -45,7 +47,7 @@ class SocketBridgeServiceProvider extends ServiceProvider
             $defaults = require __DIR__.'/../config/socket-bridge.php';
             // Laravel's mergeConfigFrom is shallow. Published 1.0 sections must
             // receive additive defaults without merging indexes in origin lists.
-            foreach (['gateway', 'install', 'metrics', 'workers'] as $section) {
+            foreach (['gateway', 'install', 'metrics', 'workers', 'retention'] as $section) {
                 $this->app['config']->set('socket-bridge.'.$section, array_replace($defaults[$section], (array) $this->app['config']->get('socket-bridge.'.$section, [])));
             }
         }
@@ -58,6 +60,7 @@ class SocketBridgeServiceProvider extends ServiceProvider
 
     public function boot(Dispatcher $events): void
     {
+        $this->app->make(CommandRegistry::class)->register('socket-bridge.probe', ProbeHandler::class);
         $name = config('socket-bridge.broadcast_connection', 'socketio');
         if (config('broadcasting.connections.'.$name) === null) {
             config(['broadcasting.connections.'.$name => ['driver' => 'socketio']]);
@@ -82,7 +85,13 @@ class SocketBridgeServiceProvider extends ServiceProvider
         $this->publishes([__DIR__.'/../stubs/deploy' => base_path('deploy/socket-bridge')], 'socket-bridge-deploy');
         $this->callAfterResolving(Schedule::class, function (Schedule $schedule): void {
             if (config('socket-bridge.retention.automatic', true)) {
-                $schedule->command('socket-bridge:prune --no-interaction')->hourly()->withoutOverlapping();
+                $minutes = (int) config('socket-bridge.retention.frequency_minutes', 1);
+                if ($minutes < 1 || $minutes > 60) {
+                    throw new \InvalidArgumentException('socket-bridge.retention.frequency_minutes must be between 1 and 60.');
+                }
+                $schedule->command('socket-bridge:prune --no-interaction')
+                    ->cron($minutes === 60 ? '0 * * * *' : '*/'.$minutes.' * * * *')
+                    ->withoutOverlapping(10);
             }
         });
         if ($this->app->runningInConsole()) {
@@ -94,6 +103,7 @@ class SocketBridgeServiceProvider extends ServiceProvider
                 ConfigureCommand::class,
                 UpgradeCommand::class,
                 PruneCommand::class,
+                ProbeCommand::class,
                 StatusCommand::class,
                 FailedCommand::class,
                 RestartCommand::class,

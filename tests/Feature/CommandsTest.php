@@ -5,12 +5,14 @@ namespace SocketBridge\Tests\Feature;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use SocketBridge\Commands\CommandContext;
 use SocketBridge\Commands\CommandProcessor;
 use SocketBridge\Commands\CommandRegistry;
 use SocketBridge\Contracts\CommandHandler;
 use SocketBridge\DTO\Envelope;
+use SocketBridge\DTO\Json;
 use SocketBridge\Tests\TestCase;
 use SocketBridge\Tests\TestUser;
 
@@ -49,6 +51,67 @@ class CommandsTest extends TestCase
         self::assertEmpty($this->redis->envelopes);
     }
 
+    public function test_nested_object_and_list_shapes_have_distinct_receipts_and_retained_results(): void
+    {
+        $handler = new class implements CommandHandler
+        {
+            public int $calls = 0;
+
+            public function handle(array $payload, CommandContext $context): array
+            {
+                $this->calls++;
+
+                return $payload;
+            }
+        };
+        app(CommandRegistry::class)->register('json.echo', $handler);
+        foreach ([['{"value":{}}', '{"value":[]}'], ['{"value":{"0":"zero"}}', '{"value":["zero"]}']] as [$original, $changed]) {
+            $command = $this->command;
+            $command['id'] = (string) Str::uuid();
+            $command['command'] = 'json.echo';
+            $command['payload'] = Json::decode($original);
+            $first = app(CommandProcessor::class)->process($command);
+            $retry = app(CommandProcessor::class)->process($command);
+            self::assertSame($original, Json::encode($first['data']));
+            self::assertSame($original, Json::encode($retry['data']));
+            $command['payload'] = Json::decode($changed);
+            self::assertSame('command.id_conflict', app(CommandProcessor::class)->process($command)['error']['code']);
+        }
+        self::assertSame(2, $handler->calls);
+    }
+
+    public function test_handler_can_return_explicit_object_without_changing_existing_array_handlers(): void
+    {
+        app(CommandRegistry::class)->register('json.object', new class implements CommandHandler
+        {
+            public function handle(array $payload, CommandContext $context): \stdClass
+            {
+                return (object) ['0' => (object) [], '1' => []];
+            }
+        });
+        $command = $this->command;
+        $command['command'] = 'json.object';
+        foreach ([1, 2] as $_) {
+            $result = app(CommandProcessor::class)->process($command);
+            self::assertSame('{"0":{},"1":[]}', Json::encode($result['data']));
+        }
+    }
+
+    public function test_empty_root_payload_keeps_the_previous_fingerprint_for_existing_receipts(): void
+    {
+        $command = $this->command;
+        $command['payload'] = [];
+        $fingerprint = hash('sha256', json_encode(['command' => $command['command'], 'payload' => []]));
+        DB::table('socket_bridge_command_receipts')->insert([
+            'session_id' => $command['context']['session_id'], 'command_id' => $command['id'],
+            'fingerprint' => $fingerprint, 'user_id' => $command['context']['user_id'],
+            'result' => '{"ok":true,"data":{"previous":true}}', 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        $command = Json::decodeEnvelope(Json::encodeEnvelope($command));
+        self::assertSame(['ok' => true, 'data' => ['previous' => true]], app(CommandProcessor::class)->process($command));
+        self::assertSame(0, DB::table('counter')->value('value'));
+    }
+
     public function test_uuid_case_variation_cannot_repeat_the_same_command(): void
     {
         app(CommandProcessor::class)->process($this->command);
@@ -82,7 +145,7 @@ class CommandsTest extends TestCase
         $processor = app(CommandProcessor::class);
         $requests = [];
         foreach ([2, 2, 5] as $amount) {
-            $request = (string) \Illuminate\Support\Str::uuid();
+            $request = (string) Str::uuid();
             $requests[] = $request;
             $this->command['context']['request_id'] = $request;
             $this->command['payload']['amount'] = $amount;

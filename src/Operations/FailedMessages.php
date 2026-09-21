@@ -6,6 +6,7 @@ use Illuminate\Auth\AuthenticationException;
 use SocketBridge\Auth\SessionManager;
 use SocketBridge\Commands\CommandProcessor;
 use SocketBridge\DTO\Envelope;
+use SocketBridge\DTO\Json;
 use SocketBridge\Outbox\OutboxStore;
 use SocketBridge\Transport\RedisStreams;
 
@@ -94,7 +95,7 @@ final class FailedMessages
     {
         switch ($envelope['type'] ?? null) {
             case 'socket.emit':
-                if (! is_array($envelope['payload'] ?? null) || ! is_string($envelope['event'] ?? null) || ! is_array($envelope['rooms'] ?? null) || $envelope['rooms'] === []) {
+                if ((! is_array($envelope['payload'] ?? null) && ! (($envelope['payload'] ?? null) instanceof \stdClass)) || ! is_string($envelope['event'] ?? null) || ! is_array($envelope['rooms'] ?? null) || $envelope['rooms'] === []) {
                     throw new \InvalidArgumentException('Malformed event.');
                 }
                 Envelope::payload($envelope['payload']);
@@ -125,9 +126,13 @@ final class FailedMessages
     private function original(array $failed): ?array
     {
         $raw = $failed['raw'] ?? $failed['envelope'] ?? null;
-        $original = is_string($raw) ? json_decode($raw, true) : $raw;
+        try {
+            $original = is_string($raw) ? Json::decodeEnvelope($raw) : $raw;
+        } catch (\JsonException) {
+            return null;
+        }
 
-        return is_array($original) ? $original : null;
+        return Json::isEnvelope($original) ? $original : null;
     }
 
     private function session(string $id, string $user): void

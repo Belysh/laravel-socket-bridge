@@ -1,7 +1,7 @@
 import { loadConfig } from './config';
 import { createGateway } from './app';
 async function main(): Promise<void> {
-  if (process.argv.includes('--version')) { process.stdout.write('socket-bridge-gateway 2.0.0 protocol/1\n'); return; }
+  if (process.argv.includes('--version')) { process.stdout.write('socket-bridge-gateway 2.1.0 protocol/1\n'); return; }
   if (Number(process.versions.node.split('.')[0]) !== 24) throw new Error('Socket Bridge gateway requires Node.js 24 LTS');
   const gateway = await createGateway(loadConfig());
   process.stdout.write(`${JSON.stringify({ service: 'socket-bridge', status: 'ready', address: gateway.address, protocol: 1 })}\n`);

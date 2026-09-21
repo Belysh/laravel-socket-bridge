@@ -1,6 +1,6 @@
 # Socket.IO and Redis protocol
 
-Implementation contract for package **2.0.0** (`belysh/laravel-socket-bridge`, PHP namespace `SocketBridge`). Each Laravel project runs its own NestJS/Socket.IO gateway. Redis Streams are mandatory; Docker is optional. Requirements: Laravel 13, PHP 8.3+, standalone Redis 7+, Node 24. Native macOS/Linux; Windows through WSL2 or Docker. Redis Cluster is not supported in this release.
+Implementation contract for package **2.1.0** (`belysh/laravel-socket-bridge`, PHP namespace `SocketBridge`). Each Laravel project runs its own NestJS/Socket.IO gateway. Redis Streams are mandatory; Docker is optional. Requirements: Laravel 13, PHP 8.3+, standalone Redis 7+, Node 24. Native macOS/Linux; Windows through WSL2 or Docker. Redis Cluster is not supported in this release.
 
 ## Redis transport
 
@@ -39,6 +39,10 @@ Trusted user/session targets are `__user:<sha256(user_id)>` and `__session:<sha2
 
 Payloads are JSON objects, up to 65,536 UTF-8 JSON bytes by default, excluding routing metadata. Empty PHP payload arrays and empty result data encode as `{}`. Emissions allow at most 1,000 rooms; total event envelopes are bounded to the payload limit plus 262,144 bytes. `except_socket` excludes one Socket.IO ID; Laravel `toOthers()` needs the originating request's `X-Socket-ID`. `except_user` excludes all sessions for that user.
 
+PHP handlers keep `handle(array $payload, CommandContext $context)`: the root array is an object field map, including numeric keys such as `{"0":"value"}` (PHP may cast these keys to integers). Nested named objects remain associative arrays; nested empty objects and objects containing only numeric keys use `stdClass`. JSON lists remain PHP lists, so `{}` differs from `[]`, and `{"0":"value"}` differs from `["value"]` through receipt fingerprints, outbox delivery and replay. Do not recursively cast these objects to arrays when their JSON shape matters.
+
+A handler can return an array field map or an explicit `stdClass`; the root result is always a JSON object. The facade accepts `array|stdClass`: use `(object) []` for an explicit empty nested object, and `emit('event', (object) $payload)` when echoing a numeric-key root map. Top-level JSON lists received from clients remain invalid. See the [JSON upgrade note](RELIABILITY.md#json-shape-compatibility) for data already stored by earlier versions.
+
 ## Tickets and identity
 
 `POST /socket-bridge/token` uses configurable Laravel middleware, default `web,auth`; the route prefix is configurable. Laravel returns `{token,expires_in,session_expires_at,url}`. The token is a random 32-byte hexadecimal value. Its SHA-256 key, `ticket:<hash>`, contains `{user_id,session_id,user_version,expires_at}` for at most 60 seconds by default, capped by session lifetime. `expires_at` describes the session, not ticket consumption time.
@@ -75,7 +79,7 @@ A successful response is `{allowed:true,expires_in:30,member?:{id,info}}`. Priva
 
 Room grants last at most 30 seconds by default. Renewal starts at a randomized 60–70% of the granted duration. A successful renewal preserves uninterrupted room membership. A temporary failure keeps the existing valid grant and retries with jittered exponential backoff, nominally 250 ms to 10 seconds. If renewal has not succeeded at expiry, the gateway removes membership and emits `bridge.subscription.suspended` with `{channel,code:"authorization_unavailable"}`. Intent is retained; a later valid grant restores membership and emits `bridge.subscription.restored` with `{channel}`.
 
-Expiry checks run independently of outstanding HTTP authorizations, at intervals no greater than 100 ms under normal event-loop operation. Slow callbacks do not extend grants. A definite denial removes membership immediately when the response is processed and emits `bridge.subscription.revoked` with `{channel,error:{code,message}}`; automatic renewal stops. Explicit leave and disconnection invalidate outstanding renewal responses.
+Expiry checks run independently of outstanding HTTP authorizations, at intervals no greater than 100 ms under normal event-loop operation. Slow callbacks do not extend grants. A definite denial removes membership immediately when the response is processed and emits `bridge.subscription.revoked` with `{channel,error:{code,message}}`; automatic renewal stops. Explicit leave and disconnection invalidate outstanding renewal responses. Repeating `room:join` for an existing membership also reauthorizes it: a terminal denial revokes the existing grant immediately; temporary authorization unavailability preserves that grant only until its original expiry. An older request cannot revoke a newer successful join.
 
 The gateway checks Redis identity during handshake, each client request and periodically (15 seconds by default). It fails closed with a retryable disconnect when periodic Redis verification is unavailable. Source credentials are rechecked in PHP during channel authorization, commands and ticket refresh. A socket receiving only automatic user-room events has no channel callback; applications must explicitly invalidate it when source access changes outside the provided logout hooks. The Redis polling interval is not a universal guarantee for source-credential revocation.
 
@@ -94,7 +98,7 @@ The gateway checks Redis identity during handshake, each client request and peri
 | Server → `bridge.subscription.revoked` | `{channel,error}`; channel intent should be removed. |
 | Server → `bridge.presence` | `{channel,members:[{id,info}]}`; snapshots deduplicate multiple tabs by authenticated user. |
 
-Presence updates on joins, leaves, disconnects, suspension/recovery and changed member information. It reflects currently connected authorized sockets, not durable attendance history. A business-event ACK reports the Laravel result. The gateway waits up to 30 seconds by default, then returns `command.timeout` with the command ID; processing may still complete. Client timeouts and disconnects also have an unknown outcome. For retries, send an explicit `{id: UUID}` argument and retain the same ID, event name and payload. Default command expiry is the earlier of session expiry and five minutes from acceptance.
+Presence updates on joins, leaves, disconnects, suspension/recovery and changed member information. It reflects currently connected authorized sockets, not durable attendance history. Periodic reconciliation also refreshes snapshots after a gateway crashes without publishing its disconnects. The default interval is 30 seconds; each sweep handles at most 100 locally active presence rooms with four requests in parallel, rotating through larger sets. Sweeps do not overlap, so many rooms or slow Redis can extend convergence beyond one interval. A business-event ACK reports the Laravel result. The gateway waits up to 30 seconds by default, then returns `command.timeout` with the command ID; processing may still complete. Client timeouts and disconnects also have an unknown outcome. For retries, send an explicit `{id: UUID}` argument and retain the same ID, event name and payload. Default command expiry is the earlier of session expiry and five minutes from acceptance.
 
 Event metadata includes `channels`, the canonical target channels this recipient belongs to. Internal user/session rooms and unrelated private targets are excluded. Use this metadata when the same event name is received from several channels. Terminal errors may include `error.details`, including Laravel validation's `details.fields`.
 
@@ -120,6 +124,7 @@ The Artisan launcher derives values from Laravel configuration. These are proces
 | `SOCKET_BRIDGE_CLAIM_IDLE_MS` | `30000`. |
 | `SOCKET_BRIDGE_AUTH_CHECK_MS` | `15000`, for bridge Redis identity. |
 | `SOCKET_BRIDGE_ROOM_LEASE_SECONDS` | `30`, maximum accepted grant duration. |
+| `SOCKET_BRIDGE_PRESENCE_RECONCILE_MS` | `30000`, range 100–300000; bounded rotating presence reconciliation, at most 100 rooms and four parallel requests per sweep. |
 | `SOCKET_BRIDGE_AUTH_TIMEOUT_MS` | `5000`. |
 | `SOCKET_BRIDGE_MAX_PAYLOAD_BYTES` | `65536`, allowed range 1,024–1,048,576. Keep PHP and gateway limits aligned. |
 | `SOCKET_BRIDGE_MAX_ROOMS` / `SOCKET_BRIDGE_MAX_CONNECTIONS` | `100` per socket / `10000` per gateway. |

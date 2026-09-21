@@ -48,7 +48,7 @@ jobs:
       - run: composer install --no-interaction --prefer-dist
       - run: npm ci --prefix gateway
       - run: npm run build --prefix gateway
-      - run: git diff --exit-code -- runtime/gateway.cjs
+      - run: git diff --exit-code -- runtime/gateway.cjs runtime/probe.cjs
       - run: php scripts/build-release.php
       - name: Publish matching GitHub release artifacts
         env:

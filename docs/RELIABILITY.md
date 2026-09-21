@@ -1,6 +1,6 @@
 # Reliability and operations
 
-This document describes the guarantees of **2.0.0**. The package connects Laravel's event and authorization APIs to a dedicated NestJS/Socket.IO runtime through Redis Streams. Recovery protects server-side processing; applications still own their durable business history and user-facing resynchronization.
+This document describes the guarantees of **2.1.0**. The package connects Laravel's event and authorization APIs to a dedicated NestJS/Socket.IO runtime through Redis Streams. Recovery protects server-side processing; applications still own their durable business history and user-facing resynchronization.
 
 ## What a successful operation means
 
@@ -27,6 +27,12 @@ Keep the same command ID, command name and payload when retrying an unknown outc
 Default receipt retention is **seven days since the receipt's last update**, including a repeated request for its result. An unpublished durable result prevents pruning that receipt. Old stream deliveries outside the configured receipt-age window are rejected before execution if no stored result exists. However, a *newly submitted* request with a previously pruned ID has a new timestamp and can execute again. Do not treat deduplication as permanent or blindly retry old operations after the retention window; query business state instead.
 
 Command expiry defaults to the earlier of five minutes after gateway acceptance and socket-session expiry. An existing receipt may still return its result, subject to current authentication, without rerunning an expired handler. Unknown command names and terminal business rejections are normal results. Exhausted transient failures produce `command.failed` and enter the dead-letter stream.
+
+### JSON shape compatibility
+
+From 2.1, command fingerprints preserve nested object/list distinctions, including `{}` versus `[]` and numeric-key objects versus lists. Existing array-based handlers remain valid, but empty and wholly numeric-key nested objects now arrive as `stdClass`; named objects still arrive as associative arrays. Preserve these types when forwarding or returning payloads. See the [PHP JSON contract](PROTOCOL.md#stream-envelopes).
+
+Upgrading preserves the historical empty-root command fingerprint and accepts earlier SQL outbox rows whose empty root payload was stored as `[]`. Earlier versions could already have lost nested JSON shape in receipts or stored event/result data; an upgrade cannot reconstruct it. Those records retain their stored representation and legacy fingerprint ambiguity. Retrying a previously accepted object payload can therefore return `command.id_conflict` after the fix; that conflict does not run the handler or repeat its business mutation. Inspect authoritative business state rather than changing the command ID to bypass it.
 
 ## Transactional outbox and event duplicates
 
@@ -55,7 +61,9 @@ Socket.IO listeners can receive repeated events after transport recovery. Applic
 
 ## Connections, access and recovery
 
-Channel renewal begins before expiry and retains valid membership while Laravel responds. Temporary errors trigger bounded retries. At the old grant's deadline, delivery is suspended until a new grant succeeds. A definitive denial immediately removes the subscription when processed. A delayed authorization response cannot undo an explicit leave or disconnection.
+Channel renewal begins before expiry and retains valid membership while Laravel responds. Temporary errors trigger bounded retries. At the old grant's deadline, delivery is suspended until a new grant succeeds. A definitive denial immediately removes the subscription when processed. A delayed authorization response cannot undo an explicit leave or disconnection. An explicit repeated join follows the same policy: terminal denial removes the previous grant immediately, while a transient failure keeps it only until its existing deadline.
+
+Presence snapshots are also reconciled after peer crashes. The default 30-second sweep rotates through at most 100 locally active rooms with four requests in parallel; sweeps do not overlap. Large room sets or slow Redis can delay convergence beyond 30 seconds, so presence is an eventually refreshed connection view, not durable attendance history.
 
 The application rejoins its channels in Socket.IO’s `connect` handler and reloads authoritative state after interruptions. For a long-lived connection, handle `bridge.session` by obtaining a fresh Laravel ticket and sending `session:refresh`. Refresh must match the current user, session and access version; it cannot revive revoked evidence. See [Socket.IO integration](SOCKET_IO.md).
 
@@ -67,11 +75,11 @@ Socket.IO Pub/Sub fanout is not a durable per-gateway queue. A disconnected repl
 
 ## Retention and pruning
 
-The package registers hourly `socket-bridge:prune` when `retention.automatic` is enabled, which is the default. **Laravel's scheduler must be running**; installing the package does not create an operating-system scheduler service.
+The package registers `socket-bridge:prune` every minute when `retention.automatic` is enabled, which is the default. **Laravel's scheduler must be running**; installing the package does not create an operating-system scheduler service.
 
 ```bash
 php artisan socket-bridge:prune --dry-run
-php artisan socket-bridge:prune --limit=1000
+php artisan socket-bridge:prune --limit=20000 --batch-size=100 --max-seconds=10
 ```
 
 | Configuration under `socket-bridge.retention` | Default | Eligibility |
@@ -83,7 +91,20 @@ php artisan socket-bridge:prune --limit=1000
 
 Stream pruning atomically examines all group delivery cursors and oldest pending IDs, then trims only entries below the resulting safe boundary. Main streams with no consumer group are preserved. A stopped or forgotten consumer group can deliberately hold back cleanup; inspect it before making a manual administrative decision. Never run blanket `XTRIM MAXLEN`, delete pending entries or flush a shared Redis database as a maintenance shortcut.
 
-Each run is bounded to 1,000 eligible entries per stream/table by default, configurable with `--limit` up to 10,000. High-volume applications must increase the limit and/or schedule more frequent runs so cleanup capacity exceeds production rate. An age setting is not a hard storage cap: pending work, inactive groups, unpublished results and bounded batches can retain records longer. Monitor Redis memory and database growth.
+Cleanup visits the four streams and two database tables in round-robin batches. Its separate controls are:
+
+| Configuration under `socket-bridge.retention` | Environment variable | Default | Bounds |
+| --- | --- | --- | --- |
+| `frequency_minutes` | `SOCKET_BRIDGE_PRUNE_FREQUENCY_MINUTES` | 1 | 1–60; cron minute step, with 60 meaning hourly |
+| `limit` | `SOCKET_BRIDGE_PRUNE_LIMIT` | 10,000 | 1–1,000,000 records scanned per resource per run |
+| `batch_size` | `SOCKET_BRIDGE_PRUNE_BATCH_SIZE` | 100 | 1–1,000 records per Redis batch / database page |
+| `max_seconds` | `SOCKET_BRIDGE_PRUNE_MAX_SECONDS` | 10 | 0.01–300 seconds per run |
+
+The CLI budget options override configuration for one run. The time budget is checked between batches and receipt transactions; it cannot interrupt an in-flight Redis command, database query or lock wait. Keep database/Redis timeouts bounded too. Each Redis batch recomputes group protection atomically, and each receipt is locked and rechecked before deletion. The receipt scan resumes between real runs, so protected old receipts do not repeatedly consume the entire record budget; it returns to the beginning after completing a pass. Dry runs inspect from the beginning without changing data, scan progress or the last-run snapshot. Run published migrations during upgrades to add the receipt retention index.
+
+The JSON report includes `scanned`, `eligible`, `deleted`, `has_more`, `retention_lag_seconds` and `protected` for each resource, plus the run's duration and `time_limit_reached`. `has_more` means there are candidates after that resource's current scan position, not an exact backlog count. It can be false while protected expired records remain. Retention lag is the age of the oldest retained expired record beyond its configured cutoff; for receipts it considers completed receipts. Unvisited resources have unknown progress/lag. `status --json` and the Prometheus exporter expose the latest real-run aggregates for seven days; a missing run has timestamp zero and unknown metrics are `NaN`. No full backlog count is needed for this telemetry.
+
+Increase the record/time budget when repeated runs leave `has_more` or growing retention lag, and investigate `protected` work before changing consumer groups. Cleanup capacity must exceed the volume aging past the retention cutoff. An age setting is not a hard storage cap: pending work, inactive groups, unpublished results and bounded budgets can retain records longer. Monitor Redis memory and database growth.
 
 Ticket/session/rate-limit keys use TTLs. User access-version keys are retained because removing them could make revoked evidence valid again. Maintenance does not erase user versions. Expiring worker/gateway heartbeats disappear automatically after crashes.
 

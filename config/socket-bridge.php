@@ -24,6 +24,10 @@ return [
     'database_connection' => null,
     'retention' => [
         'automatic' => true,
+        'frequency_minutes' => (int) env('SOCKET_BRIDGE_PRUNE_FREQUENCY_MINUTES', 1),
+        'limit' => (int) env('SOCKET_BRIDGE_PRUNE_LIMIT', 10000),
+        'batch_size' => (int) env('SOCKET_BRIDGE_PRUNE_BATCH_SIZE', 100),
+        'max_seconds' => (float) env('SOCKET_BRIDGE_PRUNE_MAX_SECONDS', 10),
         'streams_seconds' => 86400,
         'dead_letters_seconds' => 604800,
         'receipts_seconds' => 604800,
@@ -50,6 +54,7 @@ return [
         'origins' => array_values(array_filter(explode(',', env('SOCKET_BRIDGE_ORIGINS', env('APP_URL', 'http://localhost'))))),
         'transports' => ['websocket'],
         'auth_check_ms' => 15000,
+        'presence_reconcile_ms' => (int) env('SOCKET_BRIDGE_PRESENCE_RECONCILE_MS', 30000),
         'ca_cert' => env('SOCKET_BRIDGE_CA_CERT'),
         'max_buffered_bytes' => (int) env('SOCKET_BRIDGE_MAX_BUFFERED_BYTES', 1048576),
         'max_buffered_packets' => (int) env('SOCKET_BRIDGE_MAX_BUFFERED_PACKETS', 1000),

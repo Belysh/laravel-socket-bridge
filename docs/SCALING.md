@@ -1,6 +1,6 @@
 # Scaling, metrics and recovery validation
 
-Socket Bridge 2.0.0 supports multiple gateway processes and multiple Laravel command/outbox workers for one application. They share the same Redis namespace, internal secret and database. Each application keeps a separate namespace and authorization policy.
+Socket Bridge supports multiple gateway processes and multiple Laravel command/outbox workers for one application. They share the same Redis namespace, internal secret and database. Each application keeps a separate namespace and authorization policy.
 
 ## Scaling behavior
 
@@ -23,6 +23,11 @@ The response is Prometheus text exposition (`text/plain; version=0.0.4`) with `C
 | Metric prefix `socket_bridge_gateway_` | Meaning |
 | --- | --- |
 | `commands_accepted_total` | Client commands successfully appended to Redis. Acceptance is not business success. |
+| `pending_acks` | Business acknowledgements currently waiting on this gateway. |
+| `command_acks_completed_total`, `command_acks_errors_total` | Successful business responses and rejected/failed commands. |
+| `command_acks_timeouts_total` | Gateway response deadlines exceeded; queued work may still complete. |
+| `command_acks_disconnected_total` | Pending responses discarded when the socket disconnects or the process shuts down. |
+| `command_ack_seconds` | Histogram from receipt of the named Socket.IO event to dispatch of its ACK, including Redis/PHP/outbox wait. Disconnected requests without a response are excluded. |
 | `events_accepted_total` | First processing attempts for physical Redis event entries. |
 | `events_delivered_total` | Successful gateway dispatches before ACK. This is **not** browser receipt or rendering. |
 | `events_failed_total` | Event entries transferred to dead letters. |
@@ -36,7 +41,7 @@ The response is Prometheus text exposition (`text/plain; version=0.0.4`) with `C
 | `heap_bytes`, `rss_bytes` | V8 heap used and resident process memory. |
 | `processing_seconds` | Histogram of event-entry processing duration, including dispatch and acknowledgement. |
 
-Histogram bounds are 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1 and 5 seconds, plus `+Inf`; bucket counts are cumulative. Counters reset when a gateway restarts. Scrape every process and use rates/increases across restarts. Process-local delivery metrics must not be presented as a count of successfully processed business operations.
+Event-processing histogram bounds are 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1 and 5 seconds, plus `+Inf`. The command ACK histogram also includes 10, 30, 60 and 300 seconds. Bucket counts are cumulative. Counters reset when a gateway restarts. Scrape every process and use rates/increases across restarts. ACK timing ends when the gateway dispatches the response; browser processing is outside this measurement.
 
 The existing Redis gateway heartbeat remains a lightweight operational signal: updated every five seconds with a 15-second TTL. A heartbeat confirms recent activity, while stream lag, pending entries, outbox age and application-specific checks show whether useful work is progressing. PHP processing/outbox metrics are a separate producer; do not sum them with gateway dispatches as if they measure the same stage.
 
@@ -107,5 +112,7 @@ The harness is a recovery and regression check on the recorded machine and confi
 Read latency percentiles alongside fault timestamps and missing-delivery opportunities. Deliberate reconnect/slow-reader windows can dominate tail latency. A restarted gateway's heap cannot be treated as continuous lifetime growth; the report retains PID and gateway index so uninterrupted processes can be analyzed separately. Repeated slow-reader pauses that remain below the configured queue threshold exercise delayed delivery without necessarily causing a backpressure disconnect; the report records actual disconnect counts.
 
 Run `node scripts/scale-soak-analyze.mjs .test-results/scale-<run-id>` after completion. It evaluates each uninterrupted gateway PID with at least one hour of samples. After excluding ten minutes of warmup, the first and final ten-minute forced-GC heap means may differ by at most the greater of 25% or 8 MiB; the final-half linear slope must not exceed 8 MiB/hour. These thresholds are a bounded regression tolerance, not proof that a process has no memory leak. The analyzer exits unsuccessfully for a completed hour-plus run with no qualifying process or a failed memory assessment. Short-lived/restarted PIDs remain separately reported.
+
+For runs explicitly targeting 40 to less than 60 minutes, a separate `duration_limited_assessment` requires at least 35 minutes of samples from one continuous PID. It excludes ten minutes of warmup and compares the first and final five-minute windows, with at least 30 samples in each window and no sampling gap above 30 seconds. The growth limit remains `max(25%, 8 MiB)` and the final-half slope limit remains 8 MiB/hour. A passing result is named `passed-duration-limited`; the hour-plus assessment remains separate and normally reports `insufficient-duration`. Missing duration or sampling coverage does not pass and causes a completed short run's analyzer check to fail. Gateway 0 is deliberately restarted by the harness; gateway 1 is left running to provide a continuous observation. This short assessment only checks the observed interval and does not establish the absence of a memory leak. The analyzer writes `analysis.json` and never rewrites the raw run's duration or outcome.
 
 See [Validation](VALIDATION.md) for completed release results. A running measurement is not a passed test; only a report with `final:true` and `passed:true` establishes successful completion of its stated duration.

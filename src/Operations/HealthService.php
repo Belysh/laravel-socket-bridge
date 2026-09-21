@@ -45,6 +45,7 @@ final class HealthService
             'prefix' => config('socket-bridge.prefix'), 'workers' => $workers, 'gateways' => $gateways, 'streams' => $streams,
             'outbox' => ['pending' => (clone $query)->count(), 'failed' => (clone $query)->where('attempts', '>', 0)->count(), 'oldest_age_seconds' => $oldest === null ? null : (int) max(0, now()->parse($oldest)->diffInSeconds(now()))],
             'deduplication_window_seconds' => max(1, (int) config('socket-bridge.retention.receipts_seconds', 604800)),
+            'cleanup' => app(CleanupStatus::class)->snapshot(),
         ];
     }
 

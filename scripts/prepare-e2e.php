@@ -31,6 +31,7 @@ class AppServiceProvider extends ServiceProvider
         Broadcast::channel('App.Models.User.{userId}', fn ($user, $userId) => (string) $user->id === (string) $userId);
         Broadcast::channel('team.{team}', fn ($user, $team) => $team === 'allowed' ? ['name' => $user->name] : false);
         $commands->register('demo.note.create', \App\BridgeDemo\CreateNote::class);
+        $commands->register('demo.json.echo', \App\BridgeDemo\JsonEcho::class);
     }
 }
 PHP;
@@ -55,6 +56,24 @@ final class CreateNote implements CommandHandler
         Socket::durable()->toRoom('private-demo.'.$context->userId)
             ->exceptSocket($context->socketId)->emit('demo.note.created', ['note' => $note]);
         return $note;
+    }
+}
+PHP;
+
+$jsonHandler = <<<'PHP'
+<?php
+namespace App\BridgeDemo;
+
+use SocketBridge\Commands\CommandContext;
+use SocketBridge\Contracts\CommandHandler;
+use SocketBridge\Facades\Socket;
+
+final class JsonEcho implements CommandHandler
+{
+    public function handle(array $payload, CommandContext $context): array
+    {
+        Socket::durable()->toUser($context->userId)->emit('demo.json.echoed', (object) $payload);
+        return $payload;
     }
 }
 PHP;
@@ -137,6 +156,7 @@ PHP;
 @mkdir($app.'/app/BridgeDemo', 0777, true);
 file_put_contents($app.'/app/Providers/AppServiceProvider.php', $provider);
 file_put_contents($app.'/app/BridgeDemo/CreateNote.php', $handler);
+file_put_contents($app.'/app/BridgeDemo/JsonEcho.php', $jsonHandler);
 file_put_contents($app.'/app/BridgeDemo/DemoUpdated.php', $event);
 file_put_contents($app.'/app/BridgeDemo/DemoNotification.php', $notification);
 file_put_contents($app.'/app/BridgeDemo/DemoQueued.php', str_replace(['DemoUpdated', 'ShouldBroadcastNow'], ['DemoQueued', 'ShouldBroadcast'], $event));

@@ -74,7 +74,7 @@ final class PendingEmission
         return $clone;
     }
 
-    public function emit(string $event, array $payload = []): string
+    public function emit(string $event, array|\stdClass $payload = []): string
     {
         Envelope::event($event);
         Envelope::payload($payload);

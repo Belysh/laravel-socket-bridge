@@ -8,4 +8,5 @@
 /scripts export-ignore
 /phpunit.xml export-ignore
 /runtime/gateway.cjs linguist-generated=true -whitespace
+/runtime/probe.cjs linguist-generated=true -whitespace
 /runtime/THIRD_PARTY_LICENSES.txt -whitespace

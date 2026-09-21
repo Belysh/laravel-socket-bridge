@@ -205,6 +205,7 @@ The business update and outbox must use the same database connection. The outbox
 | Run multiple gateway replicas | [Scaling](docs/SCALING.md) |
 | Understand retries, deduplication and recovery | [Delivery guarantees](docs/RELIABILITY.md) |
 | Implement authentication, presence and recovery | [Socket.IO protocol reference](docs/PROTOCOL.md) |
+| Check the complete Socket.IO → PHP → ACK path | [Roundtrip diagnostics](docs/DIAGNOSTICS.md) |
 | Review release test results | [Validation](docs/VALIDATION.md) |
 
 ## Contributing

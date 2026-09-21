@@ -26,7 +26,7 @@ Release verification must cover:
 3. Named Socket.IO events reaching Laravel handlers and returning business acknowledgements.
 4. Validation, authorization, command-ID conflicts, duplicate attempts and recovery after an unknown outcome.
 5. Reconnect, channel reauthorization, session refresh, presence and revocation.
-6. Signed callback probes, protected metrics and live gateway/worker diagnostics.
+6. Signed callback probes, authenticated Socket.IO roundtrip probes, protected metrics and live gateway/worker diagnostics.
 7. Installation of the actual Composer archive and the published Packagist release.
 
 Separate database tests exercise concurrent consumers, receipt locks, outbox contention and process death at commit/publication boundaries. Transport duplicates after publication recovery are expected; repeated committed business mutations for the same retained command ID are not.
@@ -45,7 +45,7 @@ SOCKET_BRIDGE_E2E_DOCTOR=1 node scripts/e2e.mjs
 
 `build-release.php` checks the manifest, bundled gateway and required archive files. It writes the Composer ZIP and checksums under ignored `.test-results/release/`. Local Composer repository metadata is a test fixture, not a release asset.
 
-To verify public installation, use `SOCKET_BRIDGE_E2E_SOURCE=packagist`, `SOCKET_BRIDGE_E2E_VERSION=2.0.0` and a fresh fixture path. Inspect `composer.lock` to confirm the published version and GitHub source. A successful source checkout test cannot substitute for installing the release artifact.
+To verify public installation, use `SOCKET_BRIDGE_E2E_SOURCE=packagist`, `SOCKET_BRIDGE_E2E_VERSION=2.1.0` and a fresh fixture path. Inspect `composer.lock` to confirm the published version and GitHub source. A successful source checkout test cannot substitute for installing the release artifact.
 
 ## Release automation
 

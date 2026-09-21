@@ -9,6 +9,8 @@ use SocketBridge\Commands\CommandRegistry;
 use SocketBridge\Contracts\CommandHandler;
 use SocketBridge\Contracts\EnvelopeTransport;
 use SocketBridge\DTO\Envelope;
+use SocketBridge\DTO\Json;
+use SocketBridge\Facades\Socket;
 use SocketBridge\Outbox\OutboxRelay;
 use SocketBridge\Tests\TestCase;
 use SocketBridge\Tests\TestUser;
@@ -108,6 +110,52 @@ class RedisStreamsTest extends TestCase
         self::assertSame(0, $this->real->raw('XPENDING', $this->prefix.':commands', 'laravel')[0]);
         self::assertSame(1, app(OutboxRelay::class)->runOnce());
         self::assertSame(1, $this->real->raw('XLEN', $this->prefix.':events'));
+    }
+
+    public function test_numeric_key_command_and_nested_json_shapes_survive_real_streams_receipts_and_outbox(): void
+    {
+        $this->app->instance(RedisStreams::class, $this->real);
+        $this->app->instance(EnvelopeTransport::class, $this->real);
+        $user = TestUser::create(['name' => 'JSON']);
+        $session = hash('sha256', 'json-session');
+        $this->real->raw('SET', $this->real->key('session:'.$session), Json::encode([
+            'user_id' => (string) $user->id, 'session_id' => $session, 'guard' => 'web', 'provider' => 'users', 'user_version' => 0, 'expires_at' => time() + 60,
+        ]), 'EX', 60);
+        $handler = new class implements CommandHandler
+        {
+            public int $calls = 0;
+
+            public function handle(array $payload, CommandContext $context): array
+            {
+                $this->calls++;
+                Socket::durable()->toUser($context->userId)->emit('json.echoed', (object) $payload);
+
+                return $payload;
+            }
+        };
+        app(CommandRegistry::class)->register('json.echo', $handler);
+        $expected = json_decode('{"0":{"empty":{},"items":[],"numeric":{"0":"zero"},"list":[{},[],{"1":"one","0":"zero"}]},"1":"second"}');
+        $command = Envelope::make('socket.command', ['command' => 'json.echo', 'payload' => $expected, 'context' => [
+            'user_id' => (string) $user->id, 'session_id' => $session, 'socket_id' => 'json-socket',
+        ]]);
+        $raw = json_encode($command, JSON_THROW_ON_ERROR);
+        $consumer = app(CommandConsumer::class);
+        for ($i = 0; $i < 2; $i++) {
+            // Start with exact browser-style JSON, not PHP's transport serializer.
+            $this->real->raw('XADD', $this->real->key('commands'), '*', 'envelope', $raw);
+            self::assertSame(1, $consumer->runOnce('json-worker'));
+        }
+        self::assertSame(1, $handler->calls);
+        self::assertSame(3, app(OutboxRelay::class)->runOnce());
+        self::assertDatabaseCount('socket_bridge_command_receipts', 1);
+        foreach ($this->real->range('events') as $entry) {
+            $wire = json_decode($entry['raw']);
+            self::assertEquals($expected, $wire->payload ?? $wire->result->data);
+            self::assertInstanceOf(\stdClass::class, $wire->payload ?? $wire->result->data);
+        }
+        $receipt = json_decode(DB::table('socket_bridge_command_receipts')->value('result'));
+        self::assertEquals($expected, $receipt->data);
+        self::assertSame(0, $this->real->raw('XLEN', $this->real->key('dead:commands')));
     }
 
     public function test_protocol_errors_throw_but_missing_keys_and_read_timeouts_are_normal(): void

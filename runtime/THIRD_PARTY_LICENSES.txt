@@ -1,4 +1,4 @@
-Third-party licenses included in the bundled Socket Bridge gateway.
+Third-party licenses included in the bundled Socket Bridge server runtime and diagnostic CLI.
 
 
 ========================================================================

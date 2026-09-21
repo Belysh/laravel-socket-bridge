@@ -70,6 +70,7 @@ before(async () => {
     for await (const chunk of req) raw += chunk;
     const { channel } = JSON.parse(raw);
     const control = authorizations.get(channel) ?? {};
+    control.onRequest?.();
     if (control.delay) await sleep(control.delay);
     res.writeHead(control.status ?? 200, {
       "Content-Type": "application/json",
@@ -204,6 +205,58 @@ integration(
         .rooms.has(protocol.channelRoom("private-denied")),
       false,
     );
+    socket.disconnect();
+  },
+);
+integration(
+  "repeat join immediately revokes an existing grant on denial but retains it on transient failure",
+  async () => {
+    const { socket } = await connect("repeat-denied");
+    const channel = "private-repeat-denied";
+    const server = gateway.runtime.io.sockets.sockets.get(socket.id);
+    const revoked = [];
+    socket.on("bridge.subscription.revoked", (value) => revoked.push(value));
+    assert.equal((await ack(socket, "room:join", { channel })).ok, true);
+    authorizations.set(channel, { status: 503 });
+    assert.equal((await ack(socket, "room:join", { channel })).error.code, "authorization_unavailable");
+    assert.equal(server.rooms.has(protocol.channelRoom(channel)), true);
+    authorizations.set(channel, { status: 403 });
+    const denied = await ack(socket, "room:join", { channel });
+    assert.equal(denied.error.code, "forbidden");
+    assert.equal(server.rooms.has(protocol.channelRoom(channel)), false);
+    await until(() => revoked.length === 1);
+    assert.equal(revoked[0].channel, channel);
+    assert.equal(socket.connected, true);
+    socket.disconnect();
+  },
+);
+integration(
+  "stale join responses neither revoke a newer grant nor restore one after a newer denial",
+  async () => {
+    const { socket } = await connect("join-races");
+    const channel = "private-join-races";
+    const server = gateway.runtime.io.sockets.sockets.get(socket.id);
+    const revoked = [];
+    socket.on("bridge.subscription.revoked", (value) => revoked.push(value));
+    await ack(socket, "room:join", { channel });
+    let received = false;
+    authorizations.set(channel, { status: 403, delay: 150, onRequest: () => { received = true; } });
+    const oldDenial = ack(socket, "room:join", { channel });
+    await until(() => received);
+    authorizations.delete(channel);
+    assert.equal((await ack(socket, "room:join", { channel })).ok, true);
+    assert.equal((await oldDenial).error.code, "forbidden");
+    assert.equal(server.rooms.has(protocol.channelRoom(channel)), true);
+    assert.equal(revoked.length, 0);
+    received = false;
+    authorizations.set(channel, { delay: 150, onRequest: () => { received = true; } });
+    const oldGrant = ack(socket, "room:join", { channel });
+    await until(() => received);
+    authorizations.set(channel, { status: 403 });
+    assert.equal((await ack(socket, "room:join", { channel })).error.code, "forbidden");
+    assert.equal((await oldGrant).error.code, "subscription_cancelled");
+    assert.equal(server.rooms.has(protocol.channelRoom(channel)), false);
+    await until(() => revoked.length === 1);
     socket.disconnect();
   },
 );

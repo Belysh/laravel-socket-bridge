@@ -303,6 +303,60 @@ integration(
   },
 );
 integration(
+  "ACK metrics measure callback outcomes and end-to-end latency without counting abandoned or duplicate results",
+  async () => {
+    const { socket } = await connect("metrics-command-user");
+    const before = gateway.runtime.snapshot();
+    const successfulId = randomUUID();
+    const successful = socket.timeout(1500).emitWithAck("order.pay", {}, { id: successfulId });
+    const successCommand = await queued(successfulId);
+    assert.match(gateway.runtime.prometheus(), /socket_bridge_gateway_pending_acks 1\n/);
+    await sleep(40);
+    await result(successCommand);
+    assert.equal((await successful).ok, true);
+    await result(successCommand);
+    const failedId = randomUUID();
+    const failed = socket.timeout(1500).emitWithAck("order.pay", {}, { id: failedId });
+    await result(await queued(failedId), { ok: false, error: { code: "payment.declined", message: "Declined" } });
+    assert.equal((await failed).ok, false);
+    assert.equal((await socket.timeout(1500).emitWithAck("order.pay", [])).error.code, "invalid_command");
+    const originalXadd = gateway.runtime.redis.xadd;
+    try {
+      gateway.runtime.redis.xadd = async function (...args) {
+        if (args[0] === `${prefix}:commands`) throw new Error("Injected Redis write failure");
+        return originalXadd.apply(this, args);
+      };
+      assert.equal((await socket.timeout(1500).emitWithAck("order.pay", {})).error.code, "temporarily_unavailable");
+    } finally { gateway.runtime.redis.xadd = originalXadd; }
+    assert.equal(gateway.runtime.snapshot().pending_acks, 0);
+    const timedId = randomUUID();
+    const timed = await socket.timeout(1500).emitWithAck("order.pay", {}, { id: timedId });
+    assert.equal(timed.error.code, "command.timeout");
+    await result(await queued(timedId));
+    const abandonedId = randomUUID();
+    let unexpected = 0;
+    socket.emit("order.pay", {}, { id: abandonedId }, () => { unexpected++; });
+    const abandoned = await queued(abandonedId);
+    socket.disconnect();
+    await until(() => gateway.runtime.snapshot().pending_acks === 0);
+    await result(abandoned);
+    await sleep(300);
+    const after = gateway.runtime.snapshot();
+    assert.equal(after.counters.command_acks_completed - before.counters.command_acks_completed, 1);
+    assert.equal(after.counters.command_acks_errors - before.counters.command_acks_errors, 3);
+    assert.equal(after.counters.command_acks_timeouts - before.counters.command_acks_timeouts, 1);
+    assert.equal(after.counters.command_acks_disconnected - before.counters.command_acks_disconnected, 1);
+    assert.equal(after.command_ack_latency.count - before.command_ack_latency.count, 5);
+    assert.ok(after.command_ack_latency.sum - before.command_ack_latency.sum >= 0.29);
+    assert.equal(unexpected, 0);
+    const text = gateway.runtime.prometheus();
+    assert.match(text, /socket_bridge_gateway_pending_acks 0\n/);
+    assert.match(text, new RegExp(`socket_bridge_gateway_command_ack_seconds_count ${after.command_ack_latency.count}\\n`));
+    assert.doesNotMatch(text, /metrics-command-user|payment\.declined/);
+    assert.ok(!text.includes(successfulId));
+  },
+);
+integration(
   "reserved names and forged command options never reach the command stream",
   async () => {
     const { socket } = await connect();

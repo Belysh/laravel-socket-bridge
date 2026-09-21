@@ -7,6 +7,7 @@ use Illuminate\Auth\AuthenticationException;
 use Illuminate\Validation\ValidationException;
 use SocketBridge\Auth\SessionManager;
 use SocketBridge\DTO\Envelope;
+use SocketBridge\DTO\Json;
 use SocketBridge\Exceptions\CommandRejected;
 use SocketBridge\Outbox\OutboxStore;
 
@@ -21,8 +22,8 @@ class CommandProcessor
         return ($envelope['v'] ?? null) === 1 && ($envelope['type'] ?? null) === 'socket.command'
             && is_string($envelope['id'] ?? null) && Envelope::validId($envelope['id'])
             && is_string($envelope['command'] ?? null) && preg_match('/^[a-zA-Z0-9_.:-]{1,200}$/D', $envelope['command'])
-            && strlen(json_encode($envelope['payload'] ?? null, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_LINE_TERMINATORS)) <= (int) config('socket-bridge.max_payload_bytes', 65536)
-            && is_array($envelope['payload'] ?? null) && ($envelope['payload'] === [] || ! array_is_list($envelope['payload']))
+            && strlen(Json::encode($envelope['payload'] ?? null)) <= (int) config('socket-bridge.max_payload_bytes', 65536)
+            && (($envelope['payload'] ?? null) instanceof \stdClass || (is_array($envelope['payload'] ?? null) && ($envelope['payload'] === [] || ! array_is_list($envelope['payload']))))
             && is_array($context) && is_string($context['user_id'] ?? null) && strlen($context['user_id']) <= 191 && $context['user_id'] !== ''
             && is_string($context['session_id'] ?? null) && preg_match('/^[a-f0-9]{64}$/D', $context['session_id'])
             && (! array_key_exists('request_id', $context) || (is_string($context['request_id']) && Envelope::validId($context['request_id'])))
@@ -48,7 +49,10 @@ class CommandProcessor
 
             return $result;
         }
-        $fingerprint = hash('sha256', json_encode($this->canonical(['command' => $envelope['command'], 'payload' => $envelope['payload']]), JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_LINE_TERMINATORS));
+        // The root is always an object on the wire. Keep the historical empty-root
+        // fingerprint, while preserving every nested object's shape going forward.
+        $fingerprintPayload = (array) $envelope['payload'] === [] ? [] : (object) $envelope['payload'];
+        $fingerprint = hash('sha256', Json::encode(Json::canonical(['command' => $envelope['command'], 'payload' => $fingerprintPayload])));
         $database = $this->outbox->database();
 
         return $database->transaction(function () use ($database, $envelope, $contextData, $session, $fingerprint, $forcedFailure): array {
@@ -62,7 +66,7 @@ class CommandProcessor
             if (! hash_equals($receipt->fingerprint, $fingerprint) || ! hash_equals($receipt->user_id, $contextData['user_id'])) {
                 $result = $this->error('command.id_conflict', 'This command id was already used with different input.');
             } elseif ($receipt->result !== null) {
-                $result = json_decode($receipt->result, true, 512, JSON_THROW_ON_ERROR);
+                $result = Json::decode($receipt->result);
                 $database->table('socket_bridge_command_receipts')->where($key)->update(['updated_at' => now()]);
             } else {
                 try {
@@ -84,7 +88,7 @@ class CommandProcessor
                             }
                         }
                         $context = new CommandContext($session->user, $contextData['user_id'], $contextData['session_id'], $contextData['socket_id'], $envelope['id']);
-                        $data = $this->registry->resolve($envelope['command'])->handle($envelope['payload'], $context);
+                        $data = Json::object($this->registry->resolve($envelope['command'])->handle((array) $envelope['payload'], $context));
                         Envelope::payload($data);
 
                         return ['ok' => true, 'data' => $data];
@@ -98,7 +102,7 @@ class CommandProcessor
                 } catch (CommandRejected $error) {
                     $result = $this->error($error->errorCode, $error->getMessage(), $error->details);
                 }
-                $database->table('socket_bridge_command_receipts')->where($key)->update(['result' => json_encode($result, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_LINE_TERMINATORS), 'updated_at' => now()]);
+                $database->table('socket_bridge_command_receipts')->where($key)->update(['result' => Json::encode(Json::result($result)), 'updated_at' => now()]);
             }
             // Each retry can target a new socket, but never repeats the mutation.
             $this->outbox->store($this->resultEnvelope($envelope, $result));
@@ -128,19 +132,5 @@ class CommandProcessor
         }
 
         return ['ok' => false, 'error' => $error];
-    }
-
-    private function canonical(array $value): array
-    {
-        if (! array_is_list($value)) {
-            ksort($value);
-        }
-        foreach ($value as $key => $item) {
-            if (is_array($item)) {
-                $value[$key] = $this->canonical($item);
-            }
-        }
-
-        return $value;
     }
 }

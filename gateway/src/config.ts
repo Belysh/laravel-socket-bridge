@@ -4,7 +4,7 @@ export interface Config {
   commandAckTimeoutMs: number; maxPendingCommandAcks: number; maxPendingCommandAcksTotal: number;
   prefix: string; secret: string; redisUrl: string; laravelUrl: string; authorizePath: string;
   host: string; port: number; tlsCert?: string; tlsKey?: string; origins: string[]; transports: ('websocket' | 'polling')[];
-  instanceId: string; claimIdleMs: number; authCheckMs: number; roomLeaseSeconds: number;
+  instanceId: string; claimIdleMs: number; authCheckMs: number; roomLeaseSeconds: number; presenceReconcileMs: number;
   authTimeoutMs: number; maxPayloadBytes: number; maxRooms: number; maxConnections: number;
   rateLimit: number; rateWindowMs: number; maxAttempts: number; commandTtlSeconds: number;
 }
@@ -48,6 +48,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     origins, transports: transports as Config['transports'], instanceId: env.SOCKET_BRIDGE_INSTANCE_ID ?? randomUUID(),
     claimIdleMs: integer(env, 'SOCKET_BRIDGE_CLAIM_IDLE_MS', 30_000, 100, 3_600_000),
     authCheckMs: integer(env, 'SOCKET_BRIDGE_AUTH_CHECK_MS', 15_000, 100, 60_000),
+    presenceReconcileMs: integer(env, 'SOCKET_BRIDGE_PRESENCE_RECONCILE_MS', 30_000, 100, 300_000),
     roomLeaseSeconds: integer(env, 'SOCKET_BRIDGE_ROOM_LEASE_SECONDS', 30, 1, 300),
     authTimeoutMs: integer(env, 'SOCKET_BRIDGE_AUTH_TIMEOUT_MS', 5000, 100, 30_000),
     maxPayloadBytes: integer(env, 'SOCKET_BRIDGE_MAX_PAYLOAD_BYTES', 65_536, 1024, 1_048_576),

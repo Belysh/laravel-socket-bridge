@@ -2,6 +2,7 @@
 
 namespace SocketBridge\Tests\Feature;
 
+use Illuminate\Broadcasting\BroadcastManager;
 use Illuminate\Broadcasting\InteractsWithSockets;
 use Illuminate\Broadcasting\PrivateChannel;
 use Illuminate\Contracts\Broadcasting\ShouldBroadcast;
@@ -10,6 +11,8 @@ use Illuminate\Notifications\Notification;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use SocketBridge\Commands\CommandContext;
+use SocketBridge\DTO\Envelope;
+use SocketBridge\DTO\Json;
 use SocketBridge\Facades\Socket;
 use SocketBridge\Outbox\OutboxRelay;
 use SocketBridge\Tests\TestCase;
@@ -69,6 +72,30 @@ class BroadcastingTest extends TestCase
         self::assertSame(1, app(OutboxRelay::class)->runOnce());
         self::assertSame($id, $this->redis->envelopes[0]['envelope']['id']);
         self::assertSame(0, app(OutboxRelay::class)->runOnce());
+    }
+
+    public function test_pre_fix_empty_outbox_payload_remains_deliverable_after_upgrade(): void
+    {
+        $envelope = Envelope::make('socket.emit', ['event' => 'empty', 'rooms' => ['private-room.1'], 'payload' => []]);
+        DB::table('socket_bridge_outbox')->insert([
+            'id' => $envelope['id'], 'envelope' => json_encode($envelope), 'attempts' => 0,
+            'available_at' => now(), 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        self::assertSame(1, app(OutboxRelay::class)->runOnce());
+        $wire = json_decode(Json::encodeEnvelope($this->redis->envelopes[0]['envelope']));
+        self::assertInstanceOf(\stdClass::class, $wire->payload);
+        self::assertSame('{}', json_encode($wire->payload));
+    }
+
+    public function test_native_broadcaster_preserves_numeric_root_fields_and_nested_objects(): void
+    {
+        app(BroadcastManager::class)->connection('socketio')->broadcast(
+            ['private-room.1'], 'numeric', [0 => (object) [], 1 => []],
+        );
+        $wire = json_decode(Json::encodeEnvelope($this->redis->envelopes[0]['envelope']));
+        self::assertInstanceOf(\stdClass::class, $wire->payload);
+        self::assertInstanceOf(\stdClass::class, $wire->payload->{'0'});
+        self::assertSame([], $wire->payload->{'1'});
     }
 
     public function test_failed_outbox_delivery_stays_retryable_with_same_id(): void

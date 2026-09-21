@@ -402,10 +402,10 @@ async function snapshot(final = false) {
     target_duration_ms: duration,
     connections: count,
     connected,
-    gateway_processes: gateways.map((g) => ({
-      pid: g?.pid,
-      exited: g?.exitCode,
-    })),
+    gateway_processes: gateways.map((g, index) => {
+      const sample = samples.findLast((s) => s.gateway === index && s.pid === g?.pid);
+      return { pid: g?.pid, exited: g?.exitCode, pending_acks: sample?.pending_acks ?? null, sampled_at: sample?.at ?? null };
+    }),
     throughput_per_second: {
       published_events: started
         ? publishedEvents / ((Date.now() - started) / 1000)
@@ -831,6 +831,11 @@ try {
       (await groupLag("events")) === 0,
     30000,
   );
+  const ackDrainStarted = Date.now();
+  await until(() => gateways.every((gateway, index) => {
+    const sample = samples.findLast((s) => s.gateway === index && s.pid === gateway?.pid);
+    return sample?.at >= ackDrainStarted && sample.pending_acks === 0;
+  }), 30000);
   const report = await snapshot(true);
   if (phpMetricsEnabled) {
     const response = await fetch(
@@ -895,6 +900,10 @@ try {
     "No unread commands after drain",
   );
   assert.equal(report.streams.events.lag, 0, "No unread events after drain");
+  for (const gateway of report.gateway_processes) {
+    assert.equal(gateway.pending_acks, 0, "No pending business ACKs on either gateway after drain");
+    assert.ok(gateway.sampled_at >= ackDrainStarted, "ACK drain measurement must be fresh");
+  }
   assert.equal(
     barrierReceived.size,
     count,

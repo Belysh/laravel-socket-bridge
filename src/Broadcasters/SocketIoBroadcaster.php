@@ -4,6 +4,7 @@ namespace SocketBridge\Broadcasters;
 
 use Illuminate\Broadcasting\Broadcasters\Broadcaster;
 use SocketBridge\DTO\Envelope;
+use SocketBridge\DTO\Json;
 use SocketBridge\EnvelopePublisher;
 use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 
@@ -41,6 +42,7 @@ class SocketIoBroadcaster extends Broadcaster
         Envelope::event((string) $event);
         $socket = $payload['socket'] ?? null;
         unset($payload['socket']);
+        $payload = Json::object($payload);
         Envelope::payload($payload);
         $rooms = array_values(array_unique(array_map(static fn ($channel) => Envelope::room((string) $channel), $channels)));
         if ($rooms === []) {

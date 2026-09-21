@@ -7,6 +7,7 @@ use Illuminate\Redis\Connections\Connection;
 use Illuminate\Redis\RedisManager;
 use RuntimeException;
 use SocketBridge\Contracts\EnvelopeTransport;
+use SocketBridge\DTO\Json;
 use Throwable;
 
 class RedisStreams implements EnvelopeTransport
@@ -83,16 +84,7 @@ class RedisStreams implements EnvelopeTransport
 
     public function add(string $stream, array $envelope): string
     {
-        // Empty payloads must cross the wire as {}, never [].
-        foreach (['payload'] as $field) {
-            if (isset($envelope[$field]) && $envelope[$field] === []) {
-                $envelope[$field] = (object) [];
-            }
-        }
-        if (($envelope['result']['data'] ?? null) === []) {
-            $envelope['result']['data'] = (object) [];
-        }
-        $result = $this->raw('XADD', $this->key($stream), '*', 'envelope', json_encode($envelope, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_LINE_TERMINATORS));
+        $result = $this->raw('XADD', $this->key($stream), '*', 'envelope', Json::encodeEnvelope($envelope));
         if (! is_string($result)) {
             throw new RuntimeException('Redis did not acknowledge the stream write.');
         }
@@ -178,7 +170,7 @@ class RedisStreams implements EnvelopeTransport
             }
             $raw = is_string($raw) ? $raw : '';
             try {
-                $decoded = json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
+                $decoded = Json::decodeEnvelope($raw);
             } catch (\JsonException) {
                 $decoded = null;
             }

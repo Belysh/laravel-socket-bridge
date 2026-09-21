@@ -11,6 +11,7 @@ use SocketBridge\Commands\CommandRegistry;
 use SocketBridge\Contracts\CommandHandler;
 use SocketBridge\Contracts\EnvelopeTransport;
 use SocketBridge\DTO\Envelope;
+use SocketBridge\DTO\Json;
 use SocketBridge\Exceptions\CommandRejected;
 use SocketBridge\Operations\FailedMessages;
 use SocketBridge\Operations\HealthService;
@@ -147,7 +148,7 @@ class OperationsTest extends TestCase
 
     private function failed(array $envelope, string $stream = 'commands'): string
     {
-        return $this->real->add('dead:'.$stream, ['source_id' => '1-0', 'raw' => json_encode($envelope), 'reason' => 'Retry limit', 'failed_at' => now()->toISOString()]);
+        return $this->real->add('dead:'.$stream, ['source_id' => '1-0', 'raw' => Json::encodeEnvelope($envelope), 'reason' => 'Retry limit', 'failed_at' => now()->toISOString()]);
     }
 
     public function test_replay_keeps_identity_deduplicates_request_and_reexecutes_only_transient_failure(): void
@@ -161,7 +162,7 @@ class OperationsTest extends TestCase
         self::assertFalse($replayed['already_replayed']);
         self::assertTrue($failed->replay('commands', $dead)['already_replayed']);
         self::assertCount(1, $this->real->range('commands'));
-        self::assertSame($command, $this->real->range('commands')[0]['envelope']);
+        self::assertSame(Json::encodeEnvelope($command), $this->real->range('commands')[0]['raw']);
         self::assertDatabaseCount('socket_bridge_outbox', 0);
         self::assertTrue(app(CommandProcessor::class)->process($command)['ok']);
         $second = $this->failed($command);
@@ -196,6 +197,28 @@ class OperationsTest extends TestCase
         self::assertSame('Delivery failed', $failed->inspect('events')[0]['reason']);
         $failed->replay('events', $id);
         self::assertSame($envelope, $this->real->range('events')[0]['envelope']);
+    }
+
+    public function test_replay_preserves_numeric_and_empty_objects_in_both_dead_letter_formats(): void
+    {
+        $payload = json_decode('{"0":{"empty":{},"items":[],"numeric":{"0":"zero"}}}');
+        $event = Envelope::make('socket.emit', ['event' => 'json.replayed', 'rooms' => ['private-room.1'], 'payload' => $payload]);
+        $rawDead = $this->failed($event, 'events');
+        $gatewayDead = $this->real->add('dead:events', [
+            'source_id' => '1-0', 'failed_at' => now()->toISOString(), 'error' => 'Retry limit', 'envelope' => $event,
+        ]);
+        foreach ([$rawDead, $gatewayDead] as $id) {
+            app(FailedMessages::class)->replay('events', $id);
+        }
+        foreach ($this->real->range('events') as $entry) {
+            self::assertEquals($payload, json_decode($entry['raw'])->payload);
+            self::assertSame($event['id'], $entry['envelope']['id']);
+        }
+        $command = $this->command();
+        $command['payload'] = $payload;
+        $dead = $this->failed($command);
+        app(FailedMessages::class)->replay('commands', $dead);
+        self::assertEquals($payload, json_decode($this->real->range('commands')[0]['raw'])->payload);
     }
 
     public function test_signal_renews_heartbeat_during_a_busy_batch(): void

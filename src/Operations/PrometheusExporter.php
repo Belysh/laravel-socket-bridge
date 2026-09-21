@@ -39,10 +39,21 @@ final class PrometheusExporter
             $gauges['stream_lag'][$stream] = in_array(null, $lags, true) ? 'NaN' : array_sum($lags);
             $gauges['dead_letters'][$stream] = $state['dead_letters'];
         }
+        $cleanup = $health['cleanup'];
+        $gauges['cleanup_last_run_timestamp_seconds'] = [$cleanup['completed_at'] ?? 0];
+        $gauges['cleanup_duration_seconds'] = [$cleanup['duration_seconds'] ?? 'NaN'];
+        $gauges['cleanup_time_limit_reached'] = [$cleanup === null ? 'NaN' : (int) $cleanup['time_limit_reached']];
+        foreach (['scanned', 'eligible', 'deleted', 'has_more', 'retention_lag_seconds', 'protected'] as $field) {
+            foreach (['events', 'commands', 'dead:events', 'dead:commands', 'receipts', 'published_outbox'] as $resource) {
+                $value = $cleanup['resources'][$resource][$field] ?? null;
+                $gauges['cleanup_'.$field][$resource] = $value === null ? 'NaN' : (int) $value;
+            }
+        }
         foreach ($gauges as $name => $samples) {
             $lines[] = '# TYPE socket_bridge_'.$name.' gauge';
             foreach ($samples as $label => $value) {
-                $labels = is_string($label) ? '{'.($name === 'workers' ? 'role' : 'stream').'="'.$label.'"}' : '';
+                $labelName = str_starts_with($name, 'cleanup_') ? 'resource' : ($name === 'workers' ? 'role' : 'stream');
+                $labels = is_string($label) ? '{'.$labelName.'="'.$label.'"}' : '';
                 $lines[] = 'socket_bridge_'.$name.$labels.' '.$value;
             }
         }

@@ -29,7 +29,7 @@ $zip = new ZipArchive;
 if ($zip->open($archive) !== true) {
     throw new RuntimeException('Release archive could not be opened.');
 }
-foreach (['composer.json', 'runtime/gateway.cjs', 'runtime/manifest.json', 'runtime/THIRD_PARTY_LICENSES.txt', 'src/SocketBridgeServiceProvider.php', 'docker/Dockerfile', 'stubs/command-handler.php.stub', 'stubs/deploy/supervisor.conf', 'stubs/deploy/socket-bridge-commands@.service', 'stubs/deploy/nginx.conf', 'stubs/deploy/Caddyfile'] as $required) {
+foreach (['composer.json', 'runtime/gateway.cjs', 'runtime/probe.cjs', 'runtime/manifest.json', 'runtime/THIRD_PARTY_LICENSES.txt', 'src/SocketBridgeServiceProvider.php', 'docker/Dockerfile', 'stubs/command-handler.php.stub', 'stubs/deploy/supervisor.conf', 'stubs/deploy/socket-bridge-commands@.service', 'stubs/deploy/nginx.conf', 'stubs/deploy/Caddyfile'] as $required) {
     if ($zip->locateName($required) === false) {
         throw new RuntimeException('Missing release file: '.$required);
     }

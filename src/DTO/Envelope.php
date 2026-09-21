@@ -56,13 +56,13 @@ final class Envelope
     }
 
     /** @param array<string, mixed> $payload */
-    public static function payload(array $payload): void
+    public static function payload(array|\stdClass $payload): void
     {
-        if ($payload !== [] && array_is_list($payload)) {
+        if (is_array($payload) && $payload !== [] && array_is_list($payload)) {
             throw new InvalidArgumentException('Socket payload must be an object.');
         }
 
-        $encoded = json_encode($payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_LINE_TERMINATORS);
+        $encoded = Json::encode((object) $payload);
         if (strlen($encoded) > (int) config('socket-bridge.max_payload_bytes', 65536)) {
             throw new InvalidArgumentException('Socket payload exceeds the configured size limit.');
         }

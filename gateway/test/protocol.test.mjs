@@ -18,6 +18,10 @@ test('trusted targets support user routing but clients cannot request internal o
 test('configuration fails closed and supports explicit paths without accepting external URLs', () => {
   const env = {SOCKET_BRIDGE_PREFIX:'test',SOCKET_BRIDGE_SECRET:'a'.repeat(64),SOCKET_BRIDGE_REDIS_URL:'redis://127.0.0.1:6379',SOCKET_BRIDGE_LARAVEL_URL:'http://localhost',SOCKET_BRIDGE_ORIGINS:'http://localhost'};
   assert.equal(config.loadConfig(env).authorizePath,'/socket-bridge/internal/authorize');
+  assert.equal(config.loadConfig(env).presenceReconcileMs,30000);
+  assert.equal(config.loadConfig({...env,SOCKET_BRIDGE_PRESENCE_RECONCILE_MS:'100'}).presenceReconcileMs,100);
+  assert.throws(()=>config.loadConfig({...env,SOCKET_BRIDGE_PRESENCE_RECONCILE_MS:'99'}));
+  assert.throws(()=>config.loadConfig({...env,SOCKET_BRIDGE_PRESENCE_RECONCILE_MS:'300001'}));
   assert.throws(()=>config.loadConfig({...env,SOCKET_BRIDGE_SECRET:'short'}));
   assert.throws(()=>config.loadConfig({...env,SOCKET_BRIDGE_ORIGINS:'*'}));
   assert.throws(()=>config.loadConfig({...env,SOCKET_BRIDGE_AUTHORIZE_PATH:'https://other.test'}));

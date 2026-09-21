@@ -2,7 +2,7 @@ import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 const root = resolve(import.meta.dirname, '..');
-const chunks = ['Third-party licenses included in the bundled Socket Bridge gateway.\n'];
+const chunks = ['Third-party licenses included in the bundled Socket Bridge server runtime and diagnostic CLI.\n'];
 async function scan(directory) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
