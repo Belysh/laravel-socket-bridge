@@ -38,7 +38,12 @@ $configuration['repositories']['socket-bridge'] = match ($source) {
 if ($source === 'packagist') {
     unset($configuration['repositories']['socket-bridge']);
 }
-$configuration['require']['belysh/laravel-socket-bridge'] = getenv('SOCKET_BRIDGE_E2E_VERSION') ?: ($source === 'path' ? '@dev' : '^1.1');
+$defaultVersion = match ($source) {
+    'path' => '@dev',
+    'archive' => $configuration['repositories']['socket-bridge']['package']['version'],
+    default => json_decode(file_get_contents($root.'/runtime/manifest.json'), true, flags: JSON_THROW_ON_ERROR)['package_version'],
+};
+$configuration['require']['belysh/laravel-socket-bridge'] = getenv('SOCKET_BRIDGE_E2E_VERSION') ?: $defaultVersion;
 $configuration['require']['predis/predis'] = '^3.0';
 file_put_contents($app.'/composer.json', json_encode($configuration, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR)."\n");
 $run([$composer, 'update', 'belysh/laravel-socket-bridge', 'predis/predis', '--with-all-dependencies', '--no-interaction', '--no-scripts'], $app);
