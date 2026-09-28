@@ -45,6 +45,10 @@ return [
     ],
     'runtime' => ['node_binary' => env('SOCKET_BRIDGE_NODE_BINARY'), 'download' => true],
     'gateway' => [
+        'namespace' => env('SOCKET_BRIDGE_NAMESPACE', '/'),
+        'drain_timeout_ms' => (int) env('SOCKET_BRIDGE_DRAIN_TIMEOUT_MS', 5000),
+        'dedup_ttl_ms' => (int) env('SOCKET_BRIDGE_DEDUP_TTL_MS', 300000),
+        'dedup_max_entries' => (int) env('SOCKET_BRIDGE_DEDUP_MAX_ENTRIES', 256),
         'host' => env('SOCKET_BRIDGE_HOST', '127.0.0.1'),
         'port' => (int) env('SOCKET_BRIDGE_PORT', 6001),
         'tls_cert' => env('SOCKET_BRIDGE_TLS_CERT'),

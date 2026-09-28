@@ -47,6 +47,9 @@ var require_config = __commonJS({
       return value;
     }
     function loadConfig(env = process.env) {
+      const namespace = env.SOCKET_BRIDGE_NAMESPACE ?? "/";
+      if (!/^\/[a-zA-Z0-9_/-]*$/.test(namespace) || namespace.includes("..") || namespace.length > 100)
+        throw new Error("Invalid SOCKET_BRIDGE_NAMESPACE");
       const metricsToken = env.SOCKET_BRIDGE_METRICS_TOKEN || void 0;
       if (metricsToken && metricsToken.length < 32)
         throw new Error("SOCKET_BRIDGE_METRICS_TOKEN must contain at least 32 characters");
@@ -80,6 +83,10 @@ var require_config = __commonJS({
       if (!transports.length || transports.some((v) => !["websocket", "polling"].includes(v)))
         throw new Error("Invalid SOCKET_BRIDGE_TRANSPORTS");
       return {
+        namespace,
+        drainTimeoutMs: integer(env, "SOCKET_BRIDGE_DRAIN_TIMEOUT_MS", 5e3, 0, 3e5),
+        dedupTtlMs: integer(env, "SOCKET_BRIDGE_DEDUP_TTL_MS", 3e5, 1e3, 864e5),
+        dedupMaxEntries: integer(env, "SOCKET_BRIDGE_DEDUP_MAX_ENTRIES", 256, 1, 1e4),
         commandAckTimeoutMs: integer(env, "SOCKET_BRIDGE_COMMAND_ACK_TIMEOUT_MS", 3e4, 100, 3e5),
         maxPendingCommandAcks: integer(env, "SOCKET_BRIDGE_MAX_PENDING_COMMAND_ACKS", 32, 1, 1e3),
         maxPendingCommandAcksTotal: integer(env, "SOCKET_BRIDGE_MAX_PENDING_COMMAND_ACKS_TOTAL", 1e4, 1, 1e6),
@@ -113547,6 +113554,10 @@ var require_protocol = __commonJS({
       const invalid = () => {
         throw new BridgeError("invalid_envelope", "Invalid envelope fields", true);
       };
+      if (value.correlation_id !== void 0 && (typeof value.correlation_id !== "string" || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(value.correlation_id)))
+        invalid();
+      if (value.expires_at !== void 0 && (value.type !== "socket.emit" || !Number.isSafeInteger(value.expires_at) || Number(value.expires_at) < 1))
+        invalid();
       switch (value.type) {
         case "socket.emit":
           if (!(0, exports2.validEvent)(value.event) || !Array.isArray(value.rooms) || !value.rooms.length || value.rooms.length > 1e3 || !value.rooms.every((room) => (0, exports2.validChannel)(room) || typeof room === "string" && /^__(user|session):[a-f0-9]{64}$/.test(room)) || !object(value.payload))
@@ -113624,6 +113635,9 @@ var require_runtime = __commonJS({
       publisher;
       subscriber;
       io;
+      namespace;
+      draining = false;
+      closing;
       state = /* @__PURE__ */ new Map();
       pendingAckCount = 0;
       publications = new node_async_hooks_1.AsyncLocalStorage();
@@ -113636,7 +113650,7 @@ var require_runtime = __commonJS({
       presenceTimer;
       reconcilingPresence = false;
       presenceCursor = 0;
-      metrics = { connected: 0, disconnected: 0, refreshes: 0, renewals: 0, authorization_retries: 0, revoked: 0, commands_accepted: 0, command_acks_completed: 0, command_acks_errors: 0, command_acks_timeouts: 0, command_acks_disconnected: 0, events_accepted: 0, events_delivered: 0, events_failed: 0, events_duplicates: 0, events_retries: 0, slow_clients: 0 };
+      metrics = { connected: 0, disconnected: 0, refreshes: 0, renewals: 0, authorization_retries: 0, revoked: 0, commands_accepted: 0, command_acks_completed: 0, command_acks_errors: 0, command_acks_timeouts: 0, command_acks_disconnected: 0, events_accepted: 0, events_delivered: 0, events_failed: 0, events_duplicates: 0, events_suppressed: 0, events_expired: 0, events_retries: 0, slow_clients: 0 };
       observedEvents = /* @__PURE__ */ new Set();
       latencyBounds = [1e-3, 5e-3, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 5];
       latencyBuckets = new Array(10).fill(0);
@@ -113671,7 +113685,7 @@ var require_runtime = __commonJS({
           });
           client.on("close", () => {
             if (!this.stopping && this.io)
-              for (const socket of this.io.sockets.sockets.values())
+              for (const socket of this.namespace.sockets.values())
                 this.disconnect(socket, "redis_unavailable", true);
           });
         }
@@ -113694,20 +113708,23 @@ var require_runtime = __commonJS({
           cors: { origin: this.config.origins, credentials: true },
           allowRequest: (request, callback) => {
             const origin = request.headers.origin;
-            callback(null, !this.stopping && (!origin || this.config.origins.includes(origin)));
+            callback(null, !this.stopping && !this.draining && (!origin || this.config.origins.includes(origin)));
           },
           serveClient: false
         });
+        this.namespace = this.io.of(this.config.namespace);
+        if (this.config.namespace !== "/")
+          this.io.use((_socket, next) => next(new Error("Use the configured realtime namespace")));
         this.io.adapter((0, redis_adapter_1.createAdapter)(this.publisher, this.subscriber, { key: this.key("adapter"), requestsTimeout: 5e3 }));
-        this.io.use((socket, next) => {
+        this.namespace.use((socket, next) => {
           void this.authenticate(socket).then(() => next(), (error) => {
             const result = (0, protocol_1.failure)(error);
             const denied = Object.assign(new Error(result.message), { data: result });
             next(denied);
           });
         });
-        this.io.on("connection", (socket) => this.connected(socket));
-        this.io.on(FANOUT, (envelope, ack) => {
+        this.namespace.on("connection", (socket) => this.connected(socket));
+        this.namespace.on(FANOUT, (envelope, ack) => {
           try {
             this.localEmit(envelope);
             ack({ ok: true });
@@ -113715,7 +113732,7 @@ var require_runtime = __commonJS({
             ack({ ok: false });
           }
         });
-        this.io.on(RESULT, (envelope, ack) => {
+        this.namespace.on(RESULT, (envelope, ack) => {
           try {
             this.localResult(envelope);
             ack({ ok: true });
@@ -113723,7 +113740,7 @@ var require_runtime = __commonJS({
             ack({ ok: false });
           }
         });
-        this.io.on(CONTROL, (envelope, ack) => {
+        this.namespace.on(CONTROL, (envelope, ack) => {
           void this.localControl(envelope).then(() => ack({ ok: true }), () => ack({ ok: false }));
         });
         this.consuming = this.consume();
@@ -113745,7 +113762,7 @@ var require_runtime = __commonJS({
         this.initialized = true;
       }
       async ready() {
-        if (this.stopping || !this.initialized || this.clients().some((client) => client.status !== "ready"))
+        if (this.draining || this.stopping || !this.initialized || this.clients().some((client) => client.status !== "ready"))
           return false;
         try {
           return await this.redis.ping() === "PONG";
@@ -113761,7 +113778,7 @@ var require_runtime = __commonJS({
       async authenticate(socket) {
         if (!this.initialized || this.clients().some((client) => client.status !== "ready"))
           throw new protocol_1.BridgeError("redis_unavailable", "Realtime dependencies are recovering");
-        if (this.stopping || this.io.engine.clientsCount > this.config.maxConnections)
+        if (this.draining || this.stopping || this.io.engine.clientsCount > this.config.maxConnections)
           throw new protocol_1.BridgeError("capacity", "Realtime connection capacity reached");
         await this.limited(`connect:${(0, protocol_1.hash)(socket.handshake.address)}`, 5);
         const ticket = await this.consumeTicket(socket.handshake.auth?.token);
@@ -113787,8 +113804,12 @@ var require_runtime = __commonJS({
         }
       }
       connected(socket) {
+        if (this.draining || this.stopping) {
+          this.disconnect(socket, "server.draining", true);
+          return;
+        }
         const who = socket.data.identity;
-        this.state.set(socket.id, { leases: /* @__PURE__ */ new Map(), revisions: /* @__PURE__ */ new Map(), lastAuth: Date.now(), operations: 0, pending: /* @__PURE__ */ new Map() });
+        this.state.set(socket.id, { leases: /* @__PURE__ */ new Map(), revisions: /* @__PURE__ */ new Map(), lastAuth: Date.now(), operations: 0, pending: /* @__PURE__ */ new Map(), delivered: /* @__PURE__ */ new Map() });
         void socket.join([(0, protocol_1.userRoom)(who.user_id), (0, protocol_1.sessionRoom)(who.session_id)]);
         const route = (event, callback) => socket.on(event, (input, ack) => {
           void this.clientRequest(socket, input, callback).then((result) => {
@@ -113825,6 +113846,8 @@ var require_runtime = __commonJS({
         });
       }
       async clientRequest(socket, input, callback) {
+        if (this.draining)
+          throw new protocol_1.BridgeError("server.draining", "Realtime is restarting; retry after reconnect");
         const local = this.state.get(socket.id);
         if (!local || !socket.connected)
           throw new protocol_1.BridgeError("unauthenticated", "Socket is not connected");
@@ -113939,14 +113962,14 @@ ${body}`).digest("hex");
           await this.presence(channel);
       }
       async presence(channel) {
-        const sockets = await this.io.in((0, protocol_1.channelRoom)(channel)).fetchSockets();
+        const sockets = await this.namespace.in((0, protocol_1.channelRoom)(channel)).fetchSockets();
         const members = /* @__PURE__ */ new Map();
         for (const socket of sockets) {
           const member = socket.data.presence?.[channel];
           if (member && socket.data.identity)
             members.set(socket.data.identity.user_id, member);
         }
-        this.io.to((0, protocol_1.channelRoom)(channel)).emit("bridge.presence", { channel, members: [...members.values()].sort((a, b) => a.id.localeCompare(b.id)) });
+        this.namespace.to((0, protocol_1.channelRoom)(channel)).emit("bridge.presence", { channel, members: [...members.values()].sort((a, b) => a.id.localeCompare(b.id)) });
       }
       async reconcilePresence() {
         if (this.stopping || this.reconcilingPresence || this.clients().some((client) => client.status !== "ready"))
@@ -113983,6 +114006,7 @@ ${body}`).digest("hex");
         const payload = args[0], options = args[1];
         const id = (0, protocol_1.object)(options) && (0, protocol_1.validId)(options.id) ? options.id.toLowerCase() : (0, node_crypto_1.randomUUID)();
         let responded = false, timedOut = false;
+        let correlationId;
         const respond = (value) => {
           if (responded)
             return;
@@ -114002,7 +114026,7 @@ ${body}`).digest("hex");
             if (elapsed <= bound)
               this.ackLatencyBuckets[index]++;
           });
-          callback(value);
+          callback((0, protocol_1.object)(value) && correlationId ? { ...value, correlation_id: correlationId } : value);
         };
         void this.clientRequest(socket, { command: name, payload, options }, async () => {
           if (!(0, protocol_1.validCommand)(name) || !(0, protocol_1.object)(payload) || args.length < 1 || args.length > 2 || options !== void 0 && (!(0, protocol_1.object)(options) || !(0, protocol_1.validId)(options.id) || Object.keys(options).some((key) => key !== "id")))
@@ -114016,12 +114040,13 @@ ${body}`).digest("hex");
             throw new protocol_1.BridgeError("command.pending", "This command already has a pending acknowledgement on this socket");
           if (callback && (local.pending.size >= this.config.maxPendingCommandAcks || this.pendingAckCount >= this.config.maxPendingCommandAcksTotal))
             throw new protocol_1.BridgeError("rate_limited", "Too many pending command acknowledgements");
-          const requestId = (0, node_crypto_1.randomUUID)();
+          const requestId = correlationId = (0, node_crypto_1.randomUUID)();
           let pending;
           if (callback) {
             const timer = setTimeout(() => {
               if (pending && this.removePending(local, id, pending)) {
                 timedOut = true;
+                this.log("command_ack_timeout", "command.timeout", { command_id: id, correlation_id: requestId });
                 respond({ ok: false, id, error: { code: "command.timeout", message: "Command outcome is unknown. Retry the same id and input; execution is not cancelled." } });
               }
             }, this.config.commandAckTimeoutMs);
@@ -114035,6 +114060,7 @@ ${body}`).digest("hex");
           try {
             await this.redis.xadd(this.key("commands"), "*", "envelope", JSON.stringify(envelope));
             this.metrics.commands_accepted++;
+            this.log("command_accepted", "ok", { command_id: id, correlation_id: requestId });
           } catch (error) {
             if (pending)
               this.removePending(local, id, pending);
@@ -114051,7 +114077,7 @@ ${body}`).digest("hex");
         return true;
       }
       localResult(envelope) {
-        const socket = this.io.sockets.sockets.get(envelope.socket_id);
+        const socket = this.namespace.sockets.get(envelope.socket_id);
         const local = socket && this.state.get(socket.id);
         if (!socket?.connected || !local || socket.data.identity?.session_id !== envelope.session_id || socket.data.identity?.user_id !== envelope.user_id)
           return;
@@ -114059,7 +114085,7 @@ ${body}`).digest("hex");
         if (!pending || pending.requestId !== envelope.request_id || !this.removePending(local, id, pending))
           return;
         const result = envelope.result;
-        pending.respond(result.ok ? { ok: true, id, data: result.data } : { ok: false, id, error: result.error });
+        pending.respond(result.ok ? { ok: true, id, data: result.data, correlation_id: pending.requestId } : { ok: false, id, error: result.error, correlation_id: pending.requestId });
       }
       disconnect(socket, code, retryable = false) {
         if (!socket.connected)
@@ -114097,7 +114123,7 @@ ${body}`).digest("hex");
           for (const lease of local.leases.values())
             if (!lease.suspended)
               subscriptions++;
-        return { connections: this.state.size, subscriptions, pending_acks: this.pendingAckCount, counters: { ...this.metrics }, latency: { bounds: [...this.latencyBounds], buckets: [...this.latencyBuckets], count: this.latencyCount, sum: this.latencySum }, command_ack_latency: { bounds: [...this.ackLatencyBounds], buckets: [...this.ackLatencyBuckets], count: this.ackLatencyCount, sum: this.ackLatencySum }, memory: process.memoryUsage() };
+        return { draining: this.draining, connections: this.state.size, subscriptions, pending_acks: this.pendingAckCount, counters: { ...this.metrics }, latency: { bounds: [...this.latencyBounds], buckets: [...this.latencyBuckets], count: this.latencyCount, sum: this.latencySum }, command_ack_latency: { bounds: [...this.ackLatencyBounds], buckets: [...this.ackLatencyBuckets], count: this.ackLatencyCount, sum: this.ackLatencySum }, memory: process.memoryUsage() };
       }
       prometheus() {
         const snapshot = this.snapshot();
@@ -114158,7 +114184,7 @@ ${body}`).digest("hex");
       async checkLeases() {
         if (this.stopping)
           return;
-        const sockets = [...this.io.sockets.sockets.values()];
+        const sockets = [...this.namespace.sockets.values()];
         const changedPresence = /* @__PURE__ */ new Set();
         for (const socket of sockets) {
           const queued = this.buffered(socket);
@@ -114312,6 +114338,7 @@ ${body}`).digest("hex");
           if (this.observedEvents.has(envelope.id))
             this.metrics.events_duplicates++;
           await this.withPublications(() => this.dispatch(envelope));
+          this.log("event_dispatched", "ok", { event_id: envelope.id, ...typeof envelope.correlation_id === "string" ? { correlation_id: envelope.correlation_id } : {} });
           this.metrics.events_delivered++;
           this.observedEvents.add(envelope.id);
           if (this.observedEvents.size > 5e3)
@@ -114347,37 +114374,51 @@ ${body}`).digest("hex");
           throw new protocol_1.BridgeError("redis_unavailable", "Cluster delivery is temporarily unavailable");
         if (envelope.type === "socket.emit") {
           this.localEmit(envelope);
-          const replies2 = await this.io.serverSideEmitWithAck(FANOUT, envelope);
+          const replies2 = await this.namespace.serverSideEmitWithAck(FANOUT, envelope);
           if (replies2.some((reply) => !reply?.ok))
             throw new protocol_1.BridgeError("fanout_unavailable", "A gateway could not dispatch the event");
           return;
         }
         if (envelope.type === "socket.command.result") {
           this.localResult(envelope);
-          const replies2 = await this.io.serverSideEmitWithAck(RESULT, envelope);
+          const replies2 = await this.namespace.serverSideEmitWithAck(RESULT, envelope);
           if (replies2.some((reply) => !reply?.ok))
             throw new protocol_1.BridgeError("result_unavailable", "A gateway could not acknowledge the command result");
           return;
         }
         await this.localControl(envelope);
-        const replies = await this.io.serverSideEmitWithAck(CONTROL, envelope);
+        const replies = await this.namespace.serverSideEmitWithAck(CONTROL, envelope);
         if (replies.some((reply) => !reply?.ok))
           throw new protocol_1.BridgeError("control_unavailable", "A gateway could not apply the control command");
       }
       localEmit(envelope) {
+        if (typeof envelope.expires_at === "number" && envelope.expires_at <= now()) {
+          this.metrics.events_expired++;
+          return;
+        }
         const targets = [...new Set(envelope.rooms)];
         const channels = targets.filter((room) => !room.startsWith("__"));
         const recipients = /* @__PURE__ */ new Set();
         for (const target of targets) {
           const physical = target.startsWith("__") ? target : (0, protocol_1.channelRoom)(target);
-          for (const id of this.io.sockets.adapter.rooms.get(physical) ?? [])
+          for (const id of this.namespace.adapter.rooms.get(physical) ?? [])
             recipients.add(id);
         }
         const groups = /* @__PURE__ */ new Map();
         for (const id of recipients) {
-          const socket = this.io.sockets.sockets.get(id);
+          const socket = this.namespace.sockets.get(id);
           if (!socket?.connected || id === envelope.except_socket || socket.data.identity?.user_id === envelope.except_user)
             continue;
+          const delivered = this.state.get(id).delivered;
+          for (const [key2, until] of delivered) {
+            if (until > Date.now())
+              break;
+            delivered.delete(key2);
+          }
+          if (delivered.has(envelope.id)) {
+            this.metrics.events_suppressed++;
+            continue;
+          }
           const visible = channels.filter((channel) => socket.rooms.has((0, protocol_1.channelRoom)(channel)));
           const key = JSON.stringify(visible);
           let group = groups.get(key);
@@ -114387,11 +114428,20 @@ ${body}`).digest("hex");
           }
           group.sockets.push(id);
         }
-        for (const group of groups.values())
-          this.io.local.to(group.sockets).emit(envelope.event, envelope.payload, { id: envelope.id, created_at: envelope.created_at, v: 1, channels: group.channels });
+        for (const group of groups.values()) {
+          const target = this.namespace.local.to(group.sockets);
+          const emitter = envelope.expires_at === void 0 ? target : target.volatile;
+          emitter.emit(envelope.event, envelope.payload, { id: envelope.id, created_at: envelope.created_at, v: 1, channels: group.channels, ...envelope.correlation_id ? { correlation_id: envelope.correlation_id } : {}, ...envelope.expires_at ? { expires_at: envelope.expires_at } : {} });
+          for (const id of group.sockets) {
+            const delivered = this.state.get(id).delivered;
+            delivered.set(envelope.id, Date.now() + this.config.dedupTtlMs);
+            while (delivered.size > this.config.dedupMaxEntries)
+              delivered.delete(delivered.keys().next().value);
+          }
+        }
       }
       async localControl(envelope) {
-        for (const socket of this.io.sockets.sockets.values()) {
+        for (const socket of this.namespace.sockets.values()) {
           const who = socket.data.identity;
           if (envelope.type === "socket.disconnect_session") {
             if (who.session_id === envelope.session_id)
@@ -114415,13 +114465,22 @@ ${body}`).digest("hex");
           }
         }
       }
-      log(event, code) {
-        process.stderr.write(`${JSON.stringify({ service: "socket-bridge", event, code, instance: this.config.instanceId })}
+      log(event, code, context = {}) {
+        process.stderr.write(`${JSON.stringify({ service: "socket-bridge", event, code, instance: this.config.instanceId, ...context })}
 `);
       }
-      async close() {
-        if (this.stopping)
-          return;
+      close() {
+        return this.closing ??= this.drainAndClose();
+      }
+      async drainAndClose() {
+        this.draining = true;
+        const deadline = Date.now() + this.config.drainTimeoutMs;
+        this.log("drain_started", "server.draining");
+        while (Date.now() < deadline && (this.pendingAckCount > 0 || [...this.state.values()].some((local) => local.operations > 0)))
+          await delay(10);
+        if (this.io)
+          for (const socket of this.namespace.sockets.values())
+            this.disconnect(socket, "server.draining", true);
         this.stopping = true;
         this.initialized = false;
         if (this.timer)
@@ -114569,7 +114628,7 @@ var config_1 = require_config();
 var app_1 = require_app();
 async function main() {
   if (process.argv.includes("--version")) {
-    process.stdout.write("socket-bridge-gateway 2.1.0 protocol/1\n");
+    process.stdout.write("socket-bridge-gateway 2.2.0 protocol/1\n");
     return;
   }
   if (Number(process.versions.node.split(".")[0]) !== 24)
@@ -114582,7 +114641,7 @@ async function main() {
     if (closing)
       return;
     closing = true;
-    const deadline = setTimeout(() => process.exit(1), 1e4);
+    const deadline = setTimeout(() => process.exit(1), gateway.runtime.config.drainTimeoutMs + 1e4);
     deadline.unref();
     try {
       await gateway.close();

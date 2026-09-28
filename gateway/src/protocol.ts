@@ -27,6 +27,8 @@ export function parseEnvelope(raw: string, maxBytes: number): Envelope {
   try { value = JSON.parse(raw); } catch { throw new BridgeError('invalid_envelope', 'Malformed envelope JSON', true); }
   if (!object(value) || value.v !== 1 || !validId(value.id) || !string(value.type) || !string(value.created_at) || Number.isNaN(Date.parse(value.created_at))) throw new BridgeError('invalid_envelope', 'Invalid protocol envelope', true);
   const invalid = () => { throw new BridgeError('invalid_envelope', 'Invalid envelope fields', true); };
+  if (value.correlation_id !== undefined && (typeof value.correlation_id !== 'string' || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(value.correlation_id))) invalid();
+  if (value.expires_at !== undefined && (value.type !== 'socket.emit' || !Number.isSafeInteger(value.expires_at) || Number(value.expires_at) < 1)) invalid();
   switch (value.type) {
     case 'socket.emit':
       if (!validEvent(value.event) || !Array.isArray(value.rooms) || !value.rooms.length || value.rooms.length > 1000 || !value.rooms.every(room => validChannel(room) || typeof room === 'string' && /^__(user|session):[a-f0-9]{64}$/.test(room)) || !object(value.payload)) invalid();

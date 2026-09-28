@@ -4,6 +4,8 @@ namespace SocketBridge\Commands;
 
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Auth\AuthenticationException;
+use Illuminate\Support\Facades\Context;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 use SocketBridge\Auth\SessionManager;
 use SocketBridge\DTO\Envelope;
@@ -32,6 +34,28 @@ class CommandProcessor
 
     /** Persist business effects, receipt, and result together; retries return the receipt. */
     public function process(array $envelope, ?CommandRejected $forcedFailure = null): array
+    {
+        $started = microtime(true);
+        $previous = Context::getHidden('socket_bridge.correlation_id');
+        $correlation = $envelope['context']['request_id'] ?? $envelope['id'] ?? null;
+        if (is_string($correlation) && Envelope::validId($correlation)) {
+            Context::addHidden('socket_bridge.correlation_id', $correlation);
+        }
+        try {
+            $result = $this->execute($envelope, $forcedFailure);
+            Log::info('socket_bridge.command.completed', ['command_id' => $envelope['id'], 'correlation_id' => $correlation, 'ok' => $result['ok'], 'duration_ms' => round((microtime(true) - $started) * 1000)]);
+
+            return $result;
+        } finally {
+            if ($previous === null) {
+                Context::forgetHidden('socket_bridge.correlation_id');
+            } else {
+                Context::addHidden('socket_bridge.correlation_id', $previous);
+            }
+        }
+    }
+
+    private function execute(array $envelope, ?CommandRejected $forcedFailure): array
     {
         if (! $this->valid($envelope)) {
             throw new \InvalidArgumentException('Malformed bridge command.');
@@ -78,6 +102,10 @@ class CommandProcessor
                         if ($created === false || $created < time() - max(1, (int) config('socket-bridge.retention.receipts_seconds', 604800)) || $created > time() + 60) {
                             throw new CommandRejected('command.expired', 'The command is outside the deduplication window.');
                         }
+                        $lifetime = $this->registry->lifetime($envelope['command']);
+                        if ($lifetime !== null && $created + $lifetime <= time()) {
+                            throw new CommandRejected('command.expired', 'This short-lived command has expired.');
+                        }
                         if ($forcedFailure !== null) {
                             throw $forcedFailure;
                         }
@@ -87,7 +115,7 @@ class CommandProcessor
                                 throw new CommandRejected('command.expired', 'The command expired before execution.');
                             }
                         }
-                        $context = new CommandContext($session->user, $contextData['user_id'], $contextData['session_id'], $contextData['socket_id'], $envelope['id']);
+                        $context = new CommandContext($session->user, $contextData['user_id'], $contextData['session_id'], $contextData['socket_id'], $envelope['id'], $contextData['request_id'] ?? $envelope['id']);
                         $data = Json::object($this->registry->resolve($envelope['command'])->handle((array) $envelope['payload'], $context));
                         Envelope::payload($data);
 
@@ -120,6 +148,8 @@ class CommandProcessor
         if (isset($command['context']['request_id'])) {
             $fields['request_id'] = $command['context']['request_id'];
         }
+
+        $fields['correlation_id'] = $command['context']['request_id'] ?? $command['id'];
 
         return Envelope::make('socket.command.result', $fields);
     }

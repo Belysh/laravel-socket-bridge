@@ -50,6 +50,16 @@ class RedisStreamsTest extends TestCase
         parent::tearDown();
     }
 
+    public function test_explicit_bridge_url_does_not_inherit_source_connection_credentials_or_database(): void
+    {
+        config(['database.redis.bridge-tests.username' => 'wrong-user', 'database.redis.bridge-tests.password' => 'wrong-password', 'database.redis.bridge-tests.database' => 11]);
+        self::assertSame('PONG', (string) $this->real->raw('PING'));
+        $this->real->raw('SET', $this->prefix.':authority', 'bridge-url');
+        $other = new RedisStreams($this->app);
+        config(['database.redis.bridge-tests.username' => null, 'database.redis.bridge-tests.password' => null, 'database.redis.bridge-tests.database' => 0]);
+        self::assertSame('bridge-url', $other->raw('GET', $this->prefix.':authority'));
+    }
+
     public function test_stream_json_is_prefix_free_and_pending_entries_are_claimable(): void
     {
         $this->real->createGroup('events', 'gateways');

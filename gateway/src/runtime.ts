@@ -1,7 +1,7 @@
 import { createHmac, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Server as HttpServer } from 'node:http';
-import { Server, Socket } from 'socket.io';
+import { Server, Socket, Namespace } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-adapter';
 import Redis from 'ioredis';
 import type { Config } from './config';
@@ -10,7 +10,7 @@ import { BridgeError, channelRoom, Envelope, failure, hash, identity, Identity, 
 type Ack = (value: unknown) => void;
 type Lease = { until: number; renewAt: number; nextAttempt: number; attempts: number; renewing: boolean; suspended: boolean; member?: PresenceMember };
 type PendingAck = { requestId: string; respond: Ack; timer: NodeJS.Timeout };
-type LocalState = { leases: Map<string, Lease>; revisions: Map<string, number>; lastAuth: number; operations: number; pending: Map<string, PendingAck> };
+type LocalState = { leases: Map<string, Lease>; revisions: Map<string, number>; lastAuth: number; operations: number; pending: Map<string, PendingAck>; delivered: Map<string, number> };
 const CONTROL = 'bridge.internal.control.v1';
 const FANOUT = 'bridge.internal.fanout.v1';
 const RESULT = 'bridge.internal.result.v1';
@@ -27,6 +27,9 @@ export class GatewayRuntime {
   readonly publisher: Redis;
   readonly subscriber: Redis;
   io!: Server;
+  private namespace!: Namespace;
+  private draining = false;
+  private closing?: Promise<void>;
   private state = new Map<string, LocalState>();
   private pendingAckCount = 0;
   private publications = new AsyncLocalStorage<Promise<unknown>[]>();
@@ -39,7 +42,7 @@ export class GatewayRuntime {
   private presenceTimer?: NodeJS.Timeout;
   private reconcilingPresence = false;
   private presenceCursor = 0;
-  readonly metrics = { connected: 0, disconnected: 0, refreshes: 0, renewals: 0, authorization_retries: 0, revoked: 0, commands_accepted: 0, command_acks_completed: 0, command_acks_errors: 0, command_acks_timeouts: 0, command_acks_disconnected: 0, events_accepted: 0, events_delivered: 0, events_failed: 0, events_duplicates: 0, events_retries: 0, slow_clients: 0 };
+  readonly metrics = { connected: 0, disconnected: 0, refreshes: 0, renewals: 0, authorization_retries: 0, revoked: 0, commands_accepted: 0, command_acks_completed: 0, command_acks_errors: 0, command_acks_timeouts: 0, command_acks_disconnected: 0, events_accepted: 0, events_delivered: 0, events_failed: 0, events_duplicates: 0, events_suppressed: 0, events_expired: 0, events_retries: 0, slow_clients: 0 };
   private readonly observedEvents = new Set<string>();
   private readonly latencyBounds = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 5];
   private readonly latencyBuckets = new Array<number>(10).fill(0);
@@ -78,7 +81,7 @@ export class GatewayRuntime {
       client.on('close', () => {
         // A partial adapter outage can miss Pub/Sub while session Redis stays
         // healthy. Reconnect/resync every browser instead of hiding that gap.
-        if (!this.stopping && this.io) for (const socket of this.io.sockets.sockets.values()) this.disconnect(socket, 'redis_unavailable', true);
+        if (!this.stopping && this.io) for (const socket of this.namespace.sockets.values()) this.disconnect(socket, 'redis_unavailable', true);
       });
     }
   }
@@ -95,26 +98,28 @@ export class GatewayRuntime {
       cors: { origin: this.config.origins, credentials: true },
       allowRequest: (request, callback) => {
         const origin = request.headers.origin;
-        callback(null, !this.stopping && (!origin || this.config.origins.includes(origin)));
+        callback(null, !this.stopping && !this.draining && (!origin || this.config.origins.includes(origin)));
       },
       serveClient: false,
     });
+    this.namespace = this.io.of(this.config.namespace);
+    if (this.config.namespace !== '/') this.io.use((_socket, next) => next(new Error('Use the configured realtime namespace')));
     this.io.adapter(createAdapter(this.publisher, this.subscriber, { key: this.key('adapter'), requestsTimeout: 5000 }));
-    this.io.use((socket, next) => {
+    this.namespace.use((socket, next) => {
       void this.authenticate(socket).then(() => next(), error => {
         const result = failure(error);
         const denied = Object.assign(new Error(result.message), { data: result });
         next(denied);
       });
     });
-    this.io.on('connection', socket => this.connected(socket));
-    this.io.on(FANOUT, (envelope: Envelope, ack: Ack) => {
+    this.namespace.on('connection', socket => this.connected(socket));
+    this.namespace.on(FANOUT, (envelope: Envelope, ack: Ack) => {
       try { this.localEmit(envelope); ack({ ok: true }); } catch { ack({ ok: false }); }
     });
-    this.io.on(RESULT, (envelope: Envelope, ack: Ack) => {
+    this.namespace.on(RESULT, (envelope: Envelope, ack: Ack) => {
       try { this.localResult(envelope); ack({ ok: true }); } catch { ack({ ok: false }); }
     });
-    this.io.on(CONTROL, (envelope: Envelope, ack: Ack) => {
+    this.namespace.on(CONTROL, (envelope: Envelope, ack: Ack) => {
       void this.localControl(envelope).then(() => ack({ ok: true }), () => ack({ ok: false }));
     });
     this.consuming = this.consume();
@@ -132,7 +137,7 @@ export class GatewayRuntime {
     this.initialized = true;
   }
   async ready(): Promise<boolean> {
-    if (this.stopping || !this.initialized || this.clients().some(client => client.status !== 'ready')) return false;
+    if (this.draining || this.stopping || !this.initialized || this.clients().some(client => client.status !== 'ready')) return false;
     try { return await this.redis.ping() === 'PONG'; } catch { return false; }
   }
   private async limited(bucket: string, multiplier = 1): Promise<void> {
@@ -141,7 +146,7 @@ export class GatewayRuntime {
   }
   private async authenticate(socket: Socket): Promise<void> {
     if (!this.initialized || this.clients().some(client => client.status !== 'ready')) throw new BridgeError('redis_unavailable', 'Realtime dependencies are recovering');
-    if (this.stopping || this.io.engine.clientsCount > this.config.maxConnections) throw new BridgeError('capacity', 'Realtime connection capacity reached');
+    if (this.draining || this.stopping || this.io.engine.clientsCount > this.config.maxConnections) throw new BridgeError('capacity', 'Realtime connection capacity reached');
     await this.limited(`connect:${hash(socket.handshake.address)}`, 5);
     const ticket = await this.consumeTicket(socket.handshake.auth?.token);
     socket.data.identity = ticket;
@@ -163,8 +168,9 @@ export class GatewayRuntime {
     }
   }
   private connected(socket: Socket): void {
+    if (this.draining || this.stopping) { this.disconnect(socket, 'server.draining', true); return; }
     const who = socket.data.identity as Identity;
-    this.state.set(socket.id, { leases: new Map(), revisions: new Map(), lastAuth: Date.now(), operations: 0, pending: new Map() });
+    this.state.set(socket.id, { leases: new Map(), revisions: new Map(), lastAuth: Date.now(), operations: 0, pending: new Map(), delivered: new Map() });
     void socket.join([userRoom(who.user_id), sessionRoom(who.session_id)]);
     const route = (event: string, callback: (input: unknown) => Promise<unknown>) => socket.on(event, (input: unknown, ack?: Ack) => {
       void this.clientRequest(socket, input, callback).then(result => {
@@ -190,6 +196,7 @@ export class GatewayRuntime {
     });
   }
   private async clientRequest(socket: Socket, input: unknown, callback: (input: unknown) => Promise<unknown>): Promise<unknown> {
+    if (this.draining) throw new BridgeError('server.draining', 'Realtime is restarting; retry after reconnect');
     const local = this.state.get(socket.id);
     if (!local || !socket.connected) throw new BridgeError('unauthenticated', 'Socket is not connected');
     if (local.operations >= 4) throw new BridgeError('rate_limited', 'Too many concurrent realtime requests');
@@ -280,13 +287,13 @@ export class GatewayRuntime {
     if (channel.startsWith('presence-') && !this.stopping) await this.presence(channel);
   }
   private async presence(channel: string): Promise<void> {
-    const sockets = await this.io.in(channelRoom(channel)).fetchSockets();
+    const sockets = await this.namespace.in(channelRoom(channel)).fetchSockets();
     const members = new Map<string, PresenceMember>();
     for (const socket of sockets) {
       const member = socket.data.presence?.[channel];
       if (member && socket.data.identity) members.set(socket.data.identity.user_id, member);
     }
-    this.io.to(channelRoom(channel)).emit('bridge.presence', { channel, members: [...members.values()].sort((a, b) => a.id.localeCompare(b.id)) });
+    this.namespace.to(channelRoom(channel)).emit('bridge.presence', { channel, members: [...members.values()].sort((a, b) => a.id.localeCompare(b.id)) });
   }
   private async reconcilePresence(): Promise<void> {
     if (this.stopping || this.reconcilingPresence || this.clients().some(client => client.status !== 'ready')) return;
@@ -318,6 +325,7 @@ export class GatewayRuntime {
     const payload = args[0], options = args[1];
     const id = object(options) && validId(options.id) ? options.id.toLowerCase() : randomUUID();
     let responded = false, timedOut = false;
+    let correlationId: string | undefined;
     const respond: Ack = value => {
       if (responded) return;
       responded = true;
@@ -328,7 +336,7 @@ export class GatewayRuntime {
       const elapsed = (performance.now() - started) / 1000;
       this.ackLatencyCount++; this.ackLatencySum += elapsed;
       this.ackLatencyBounds.forEach((bound, index) => { if (elapsed <= bound) this.ackLatencyBuckets[index]++; });
-      callback(value);
+      callback(object(value) && correlationId ? { ...value, correlation_id: correlationId } : value);
     };
     void this.clientRequest(socket, { command: name, payload, options }, async () => {
       if (!validCommand(name) || !object(payload) || args.length < 1 || args.length > 2 || options !== undefined && (!object(options) || !validId(options.id) || Object.keys(options).some(key => key !== 'id'))) throw new BridgeError('invalid_command', 'Expected a named event, object payload and optional {id: UUID}');
@@ -337,12 +345,13 @@ export class GatewayRuntime {
       if (!local || !socket.connected) throw new BridgeError('unauthenticated', 'Socket is no longer connected');
       if (local.pending.has(id)) throw new BridgeError('command.pending', 'This command already has a pending acknowledgement on this socket');
       if (callback && (local.pending.size >= this.config.maxPendingCommandAcks || this.pendingAckCount >= this.config.maxPendingCommandAcksTotal)) throw new BridgeError('rate_limited', 'Too many pending command acknowledgements');
-      const requestId = randomUUID();
+      const requestId = correlationId = randomUUID();
       let pending: PendingAck | undefined;
       if (callback) {
         const timer = setTimeout(() => {
           if (pending && this.removePending(local, id, pending)) {
             timedOut = true;
+            this.log('command_ack_timeout', 'command.timeout', { command_id: id, correlation_id: requestId });
             respond({ ok: false, id, error: { code: 'command.timeout', message: 'Command outcome is unknown. Retry the same id and input; execution is not cancelled.' } });
           }
         }, this.config.commandAckTimeoutMs);
@@ -355,6 +364,7 @@ export class GatewayRuntime {
       try {
         await this.redis.xadd(this.key('commands'), '*', 'envelope', JSON.stringify(envelope));
         this.metrics.commands_accepted++;
+        this.log('command_accepted', 'ok', { command_id: id, correlation_id: requestId });
       } catch (error) {
         if (pending) this.removePending(local, id, pending);
         throw error;
@@ -367,13 +377,13 @@ export class GatewayRuntime {
     return true;
   }
   private localResult(envelope: Envelope): void {
-    const socket = this.io.sockets.sockets.get(envelope.socket_id as string);
+    const socket = this.namespace.sockets.get(envelope.socket_id as string);
     const local = socket && this.state.get(socket.id);
     if (!socket?.connected || !local || socket.data.identity?.session_id !== envelope.session_id || socket.data.identity?.user_id !== envelope.user_id) return;
     const id = (envelope.command_id as string).toLowerCase(), pending = local.pending.get(id);
     if (!pending || pending.requestId !== envelope.request_id || !this.removePending(local, id, pending)) return;
     const result = envelope.result as Record<string, unknown>;
-    pending.respond(result.ok ? { ok: true, id, data: result.data } : { ok: false, id, error: result.error });
+    pending.respond(result.ok ? { ok: true, id, data: result.data, correlation_id: pending.requestId } : { ok: false, id, error: result.error, correlation_id: pending.requestId });
   }
   private disconnect(socket: Socket, code: string, retryable = false): void {
     if (!socket.connected) return;
@@ -402,7 +412,7 @@ export class GatewayRuntime {
   snapshot(): Record<string, unknown> {
     let subscriptions = 0;
     for (const local of this.state.values()) for (const lease of local.leases.values()) if (!lease.suspended) subscriptions++;
-    return { connections: this.state.size, subscriptions, pending_acks: this.pendingAckCount, counters: { ...this.metrics }, latency: { bounds: [...this.latencyBounds], buckets: [...this.latencyBuckets], count: this.latencyCount, sum: this.latencySum }, command_ack_latency: { bounds: [...this.ackLatencyBounds], buckets: [...this.ackLatencyBuckets], count: this.ackLatencyCount, sum: this.ackLatencySum }, memory: process.memoryUsage() };
+    return { draining: this.draining, connections: this.state.size, subscriptions, pending_acks: this.pendingAckCount, counters: { ...this.metrics }, latency: { bounds: [...this.latencyBounds], buckets: [...this.latencyBuckets], count: this.latencyCount, sum: this.latencySum }, command_ack_latency: { bounds: [...this.ackLatencyBounds], buckets: [...this.ackLatencyBuckets], count: this.ackLatencyCount, sum: this.ackLatencySum }, memory: process.memoryUsage() };
   }
   prometheus(): string {
     const snapshot = this.snapshot();
@@ -453,7 +463,7 @@ export class GatewayRuntime {
   }
   private async checkLeases(): Promise<void> {
     if (this.stopping) return;
-    const sockets = [...this.io.sockets.sockets.values()];
+    const sockets = [...this.namespace.sockets.values()];
     const changedPresence = new Set<string>();
     for (const socket of sockets) {
       const queued = this.buffered(socket);
@@ -571,6 +581,7 @@ export class GatewayRuntime {
       const envelope = parseEnvelope(raw, this.config.maxPayloadBytes);
       if (this.observedEvents.has(envelope.id)) this.metrics.events_duplicates++;
       await this.withPublications(() => this.dispatch(envelope));
+      this.log('event_dispatched', 'ok', { event_id: envelope.id, ...(typeof envelope.correlation_id === 'string' ? { correlation_id: envelope.correlation_id } : {}) });
       this.metrics.events_delivered++;
       this.observedEvents.add(envelope.id);
       if (this.observedEvents.size > 5000) this.observedEvents.delete(this.observedEvents.values().next().value!);
@@ -600,32 +611,36 @@ export class GatewayRuntime {
     if (this.publisher.status !== 'ready' || this.subscriber.status !== 'ready') throw new BridgeError('redis_unavailable', 'Cluster delivery is temporarily unavailable');
     if (envelope.type === 'socket.emit') {
       this.localEmit(envelope);
-      const replies = await this.io.serverSideEmitWithAck(FANOUT, envelope);
+      const replies = await this.namespace.serverSideEmitWithAck(FANOUT, envelope);
       if (replies.some(reply => !reply?.ok)) throw new BridgeError('fanout_unavailable', 'A gateway could not dispatch the event');
       return;
     }
     if (envelope.type === 'socket.command.result') {
       this.localResult(envelope);
-      const replies = await this.io.serverSideEmitWithAck(RESULT, envelope);
+      const replies = await this.namespace.serverSideEmitWithAck(RESULT, envelope);
       if (replies.some(reply => !reply?.ok)) throw new BridgeError('result_unavailable', 'A gateway could not acknowledge the command result');
       return;
     }
     await this.localControl(envelope);
-    const replies = await this.io.serverSideEmitWithAck(CONTROL, envelope);
+    const replies = await this.namespace.serverSideEmitWithAck(CONTROL, envelope);
     if (replies.some(reply => !reply?.ok)) throw new BridgeError('control_unavailable', 'A gateway could not apply the control command');
   }
   private localEmit(envelope: Envelope): void {
+    if (typeof envelope.expires_at === 'number' && envelope.expires_at <= now()) { this.metrics.events_expired++; return; }
     const targets = [...new Set(envelope.rooms as string[])];
     const channels = targets.filter(room => !room.startsWith('__'));
     const recipients = new Set<string>();
     for (const target of targets) {
       const physical = target.startsWith('__') ? target : channelRoom(target);
-      for (const id of this.io.sockets.adapter.rooms.get(physical) ?? []) recipients.add(id);
+      for (const id of this.namespace.adapter.rooms.get(physical) ?? []) recipients.add(id);
     }
     const groups = new Map<string, { channels: string[]; sockets: string[] }>();
     for (const id of recipients) {
-      const socket = this.io.sockets.sockets.get(id);
+      const socket = this.namespace.sockets.get(id);
       if (!socket?.connected || id === envelope.except_socket || socket.data.identity?.user_id === envelope.except_user) continue;
+      const delivered = this.state.get(id)!.delivered;
+      for (const [key, until] of delivered) { if (until > Date.now()) break; delivered.delete(key); }
+      if (delivered.has(envelope.id)) { this.metrics.events_suppressed++; continue; }
       // Routing metadata must not disclose other private targets in a union.
       // Each socket is assigned once, while equal authorized intersections can
       // share one encoded packet. No cross-node socket inventory is required.
@@ -635,10 +650,19 @@ export class GatewayRuntime {
       if (!group) { group = { channels: visible, sockets: [] }; groups.set(key, group); }
       group.sockets.push(id);
     }
-    for (const group of groups.values()) this.io.local.to(group.sockets).emit(envelope.event as string, envelope.payload, { id: envelope.id, created_at: envelope.created_at, v: 1, channels: group.channels });
+    for (const group of groups.values()) {
+      const target = this.namespace.local.to(group.sockets);
+      const emitter = envelope.expires_at === undefined ? target : target.volatile;
+      emitter.emit(envelope.event as string, envelope.payload, { id: envelope.id, created_at: envelope.created_at, v: 1, channels: group.channels, ...(envelope.correlation_id ? { correlation_id: envelope.correlation_id } : {}), ...(envelope.expires_at ? { expires_at: envelope.expires_at } : {}) });
+      for (const id of group.sockets) {
+        const delivered = this.state.get(id)!.delivered;
+        delivered.set(envelope.id, Date.now() + this.config.dedupTtlMs);
+        while (delivered.size > this.config.dedupMaxEntries) delivered.delete(delivered.keys().next().value!);
+      }
+    }
   }
   private async localControl(envelope: Envelope): Promise<void> {
-    for (const socket of this.io.sockets.sockets.values()) {
+    for (const socket of this.namespace.sockets.values()) {
       const who = socket.data.identity as Identity;
       if (envelope.type === 'socket.disconnect_session') {
         if (who.session_id === envelope.session_id) this.disconnect(socket, 'session_revoked');
@@ -653,9 +677,14 @@ export class GatewayRuntime {
       }
     }
   }
-  private log(event: string, code: string): void { process.stderr.write(`${JSON.stringify({ service: 'socket-bridge', event, code, instance: this.config.instanceId })}\n`); }
-  async close(): Promise<void> {
-    if (this.stopping) return;
+  private log(event: string, code: string, context: Record<string, string> = {}): void { process.stderr.write(`${JSON.stringify({ service: 'socket-bridge', event, code, instance: this.config.instanceId, ...context })}\n`); }
+  close(): Promise<void> { return this.closing ??= this.drainAndClose(); }
+  private async drainAndClose(): Promise<void> {
+    this.draining = true;
+    const deadline = Date.now() + this.config.drainTimeoutMs;
+    this.log('drain_started', 'server.draining');
+    while (Date.now() < deadline && (this.pendingAckCount > 0 || [...this.state.values()].some(local => local.operations > 0))) await delay(10);
+    if (this.io) for (const socket of this.namespace.sockets.values()) this.disconnect(socket, 'server.draining', true);
     this.stopping = true;
     this.initialized = false;
     if (this.timer) clearInterval(this.timer);

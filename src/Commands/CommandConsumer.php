@@ -3,6 +3,7 @@
 namespace SocketBridge\Commands;
 
 use Illuminate\Support\Facades\Facade;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use SocketBridge\Exceptions\CommandRejected;
 use SocketBridge\Operations\Metrics;
@@ -50,7 +51,7 @@ class CommandConsumer
                 }
                 $processed++;
             } catch (Throwable $error) {
-                report($error);
+                Log::warning('socket_bridge.command.retry', ['command_id' => $entry['envelope']['id'], 'correlation_id' => $entry['envelope']['context']['request_id'] ?? null, 'exception_class' => $error::class]);
                 if ($this->redis->attempts('commands', 'laravel', $entry['id']) >= (int) config('socket-bridge.command_max_attempts', 5)) {
                     // If even storing the final result fails, leave it pending.
                     $this->processor->process($entry['envelope'], new CommandRejected('command.failed', 'The command could not be completed.'));

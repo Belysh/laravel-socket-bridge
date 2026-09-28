@@ -195,6 +195,17 @@ DB::transaction(function () use ($order) {
 
 The business update and outbox must use the same database connection. The outbox worker publishes the event to Redis and retries after failures.
 
+Typing and other short-lived signals can expire before delivery:
+
+```php
+Socket::toRoom('private-chat.'.$chat->id)
+    ->ephemeral(5)
+    ->correlate($requestId)
+    ->emit('chat.typing', ['active' => true]);
+```
+
+Register short-lived incoming commands with `ttlSeconds: 5` as the third argument to `CommandRegistry::register()`. Durable business events continue to use the transactional outbox. See [delivery controls](docs/RELIABILITY.md#short-lived-events).
+
 ## More ways to use the bridge
 
 | Task | Guide |

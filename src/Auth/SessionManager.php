@@ -37,7 +37,7 @@ class SessionManager
         $ticketData = array_intersect_key($evidence, array_flip(['user_id', 'session_id', 'user_version', 'expires_at']));
         $this->redis->raw('SET', $this->redis->key('ticket:'.hash('sha256', $ticket)), json_encode($ticketData, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_LINE_TERMINATORS), 'EX', $ticketTtl);
 
-        return ['token' => $ticket, 'expires_in' => $ticketTtl, 'session_expires_at' => $evidence['expires_at'], 'url' => config('socket-bridge.gateway.public_url')];
+        return ['token' => $ticket, 'expires_in' => $ticketTtl, 'session_expires_at' => $evidence['expires_at'], 'url' => config('socket-bridge.gateway.public_url'), 'namespace' => config('socket-bridge.gateway.namespace', '/')];
     }
 
     public function resolve(string $sessionId): AuthenticatedSession

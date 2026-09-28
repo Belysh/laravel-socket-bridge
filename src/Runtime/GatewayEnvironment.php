@@ -46,6 +46,7 @@ final class GatewayEnvironment
             throw new RuntimeException('SOCKET_BRIDGE_PORT must be between 1 and 65535.');
         }
         $environment = [
+            'SOCKET_BRIDGE_NAMESPACE' => (string) $this->config->get('socket-bridge.gateway.namespace', '/'),
             'NODE_ENV' => $this->config->get('app.env') === 'production' ? 'production' : 'development',
             'SOCKET_BRIDGE_PREFIX' => $prefix,
             'SOCKET_BRIDGE_SECRET' => $secret,
@@ -63,6 +64,9 @@ final class GatewayEnvironment
         ];
         $environment['SOCKET_BRIDGE_PUBLIC_URL'] = (string) $this->config->get('socket-bridge.gateway.public_url', 'http://localhost:'.$port);
         foreach ([
+            'drain_timeout_ms' => ['SOCKET_BRIDGE_DRAIN_TIMEOUT_MS', 5000, 0, 300000],
+            'dedup_ttl_ms' => ['SOCKET_BRIDGE_DEDUP_TTL_MS', 300000, 1000, 86400000],
+            'dedup_max_entries' => ['SOCKET_BRIDGE_DEDUP_MAX_ENTRIES', 256, 1, 10000],
             'presence_reconcile_ms' => ['SOCKET_BRIDGE_PRESENCE_RECONCILE_MS', 30000, 100, 300000],
             'max_buffered_bytes' => ['SOCKET_BRIDGE_MAX_BUFFERED_BYTES', 1048576, 65536, 67108864],
             'max_buffered_packets' => ['SOCKET_BRIDGE_MAX_BUFFERED_PACKETS', 1000, 10, 100000],

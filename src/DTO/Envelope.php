@@ -2,6 +2,7 @@
 
 namespace SocketBridge\DTO;
 
+use Illuminate\Support\Facades\Context;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
 
@@ -16,7 +17,20 @@ final class Envelope
             throw new InvalidArgumentException('Envelope id must be a UUID.');
         }
 
+        $correlation = Context::getHidden('socket_bridge.correlation_id');
+        if (! isset($fields['correlation_id']) && is_string($correlation)) {
+            self::correlation($correlation);
+            $fields['correlation_id'] = $correlation;
+        }
+
         return ['v' => 1, 'id' => $id === null ? (string) Str::uuid() : strtolower($id), 'type' => $type, 'created_at' => now()->utc()->toISOString()] + $fields;
+    }
+
+    public static function correlation(string $id): void
+    {
+        if (! preg_match('/^[a-zA-Z0-9_.:-]{1,128}$/D', $id)) {
+            throw new InvalidArgumentException('Invalid correlation identifier.');
+        }
     }
 
     public static function validId(mixed $id): bool

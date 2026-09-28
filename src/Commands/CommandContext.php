@@ -7,7 +7,7 @@ use Illuminate\Contracts\Broadcasting\ShouldBroadcast;
 
 final readonly class CommandContext
 {
-    public function __construct(public Authenticatable $user, public string $userId, public string $sessionId, public string $socketId, public string $commandId) {}
+    public function __construct(public Authenticatable $user, public string $userId, public string $sessionId, public string $socketId, public string $commandId, public ?string $correlationId = null) {}
 
     /** Carry the verified origin into Laravel's queued BroadcastEvent. */
     public function broadcast(ShouldBroadcast $event): void

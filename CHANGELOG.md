@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.2.0 — 2026-09-28
+
+- Drain admitted command acknowledgements before shutdown, reject new work and expose not-ready immediately; configure the bounded drain deadline.
+- Add `ephemeral(ttlSeconds)` emissions and handler registration TTLs. Expired signals are discarded before dispatch/execution.
+- Suppress repeated event IDs per connected socket with bounded memory and time, including successful recipients during partial cluster retries.
+- Carry correlation through command context, Laravel Context, acknowledgements, events and structured logs.
+- Support a configurable Socket.IO namespace and return it with single-use tickets. The default remains `/`.
+- Treat an explicit Redis URL as the complete connection endpoint in PHP and Node, without inheriting unrelated Laravel credentials or database numbers.
+
+Upgrade all replicas together. Refresh published configuration through `socket-bridge:upgrade`, restart PHP workers and gateway, and review the delivery-window limitations below. No database migration is required for this package release.
+
 ## 2.1.0 — 2026-09-21
 
 - Immediately remove an existing channel grant when a repeated join receives a terminal denial, with protection against stale concurrent responses.

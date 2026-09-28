@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace SocketBridge\Console;
 
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Log;
 use SocketBridge\Operations\WorkerHeartbeat;
 use SocketBridge\Operations\WorkerRestart;
 use Throwable;
@@ -91,7 +92,7 @@ final class WorkerLoop
 
             return Command::SUCCESS;
         } catch (Throwable $error) {
-            report($error);
+            Log::error('socket_bridge.worker.failed', ['role' => $role, 'exception_class' => $error::class]);
             $command->error('Socket Bridge worker failed. Check Redis/database availability, run migrations and socket-bridge:doctor, then restart the worker.');
 
             return Command::FAILURE;

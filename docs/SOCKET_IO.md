@@ -158,3 +158,13 @@ Members are `{id, info}` values returned by Laravel's presence policy. Multiple 
 Laravel broadcast notifications use the event `Illuminate\Notifications\Events\BroadcastNotificationCreated` on the notifiable's private channel, unless customized by the application. Subscribe through `room:join` and receive them with `socket.on()` just like any other event.
 
 For the complete event and authentication contract, see [Protocol](PROTOCOL.md).
+
+## Versioned namespace
+
+When tickets return `namespace: "/v1"`, connect using `io(ticket.url.replace(/\/$/, '') + ticket.namespace, { auth: { token: ticket.token } })`. The HTTP transport still uses `/socket.io/`. Request a fresh ticket for each reconnect and rejoin authorized channels. `socket-bridge:probe` uses the returned namespace automatically.
+
+## Restart and ephemeral signals
+
+Handle `bridge.disconnect` with `code: "server.draining"` as a recoverable restart. A server disconnect requires an explicit fresh-ticket reconnect; Socket.IO does not automatically reconnect after `io server disconnect`. Use bounded backoff. Replay unknown commands with their original IDs and fetch missed application history.
+
+For `typing`, respect `metadata.expires_at` and clear the local indicator after its deadline even if no stop signal arrives. These events can be dropped on a busy connection. Event ID suppression is bounded; business state still needs entity-version checks and reconnect recovery.

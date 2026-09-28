@@ -1,6 +1,6 @@
 # Reliability and operations
 
-This document describes the guarantees of **2.1.0**. The package connects Laravel's event and authorization APIs to a dedicated NestJS/Socket.IO runtime through Redis Streams. Recovery protects server-side processing; applications still own their durable business history and user-facing resynchronization.
+This document describes the guarantees of **2.2.0**. The package connects Laravel's event and authorization APIs to a dedicated NestJS/Socket.IO runtime through Redis Streams. Recovery protects server-side processing; applications still own their durable business history and user-facing resynchronization.
 
 ## What a successful operation means
 
@@ -147,3 +147,29 @@ SOCKET_BRIDGE_TEST_REDIS_URL=redis://127.0.0.1:16389/0 \
 ```
 
 Build the gateway before running it. It creates an isolated Redis prefix, starts 300 clients for 125 seconds by default, injects authorization unavailability, gateway Redis-connection loss and mass transport reconnects, then checks recovery and sampled gateway memory in a separate process. It cleans only its own Redis keys. This is a regression check, not a production capacity guarantee. See [Validation](VALIDATION.md) for the environment and actual release results.
+
+## Short-lived events
+
+`Socket::toRoom(...)->ephemeral(5)->emit(...)` stamps a Unix-seconds `expires_at` when the pending emission is created. Lifetime is 1–300 seconds. A gateway drops expired envelopes, including retries and delayed cluster fanout. Live signals use Socket.IO volatile emission so a busy transport does not queue obsolete UI hints. They have no offline delivery guarantee. Expired entries are acknowledged normally, so they cannot clog the stream. They remain subject to ordinary stream retention.
+
+Ephemeral emissions cannot be combined with `durable()`. A typing indicator must also expire locally at the receiver; an absent `active: false` signal must never leave it visible indefinitely.
+
+For the incoming side, register `register('conversation.typing', Handler::class, ttlSeconds: 5)`. The PHP worker checks age measured from gateway acceptance, before invoking the handler. A valid existing receipt can still be replayed without executing the handler. Both directions need TTLs: expiring an outgoing signal alone would still allow stale queued commands to emit a new one.
+
+## Transport duplicate suppression
+
+Gateways retain up to `SOCKET_BRIDGE_DEDUP_MAX_ENTRIES` (default 256) successful event IDs per socket, for `SOCKET_BRIDGE_DEDUP_TTL_MS` (default 300000). These are capacity and time bounds: a busy socket may evict an ID before its TTL. Retrying a failed cluster handoff still contacts peers, while sockets that already received an emission suppress that ID. Cache entries are written after local dispatch, never as a global delivered flag before peers succeed.
+
+This does not make delivery exactly once. Reconnect, process restart, eviction or expiry removes that memory, and dispatch is not browser receipt. Retain application event IDs and entity versions in durable business payloads, ignore stale versions, and recover from authoritative history after reconnect. Reusing an event ID for different content is invalid application behavior.
+
+## Graceful drain
+
+SIGTERM/SIGINT begins drain: readiness immediately fails, handshakes and new commands are rejected, and the event consumer remains available to finish admitted ACKs. The default deadline is 5000 ms (`SOCKET_BRIDGE_DRAIN_TIMEOUT_MS`, 0–300000). At completion or deadline, remaining sockets receive `bridge.disconnect` with `code: server.draining, retryable: true`, followed by shutdown. A late handshake cannot sneak in after drain begins.
+
+An ACK that misses the deadline has an unknown business outcome. Retry with the original operation ID after reconnect; the durable command remains processable. Set the supervisor/container stop timeout above the drain budget plus 10 seconds. Source-credential validation and room renewal continue during drain. Drain does not wait for every possible future event or offline recipient.
+
+## Correlation
+
+The gateway generates a separate request UUID for each admitted command attempt. It appears in `CommandContext::$correlationId`, the ACK `correlation_id`, PHP completion logs and gateway admission logs. During handler execution, hidden Laravel Context `socket_bridge.correlation_id` supplies correlation to facade/control/broadcaster envelopes and queued Laravel jobs; prior context is restored in a `finally` block. `correlate($id)` explicitly sets it for HTTP-origin or external outbox events. IDs must be 1–128 ASCII letters, digits, dots, underscores, colons or hyphens.
+
+Retries have different attempt correlation IDs and the same command/business operation ID. Keep both when investigating an unknown result. Event metadata and gateway dispatch logs include event ID and correlation when supplied; payloads, credentials and message text are not logged by the bridge.

@@ -358,6 +358,7 @@ integration(
       assert.deepEqual(await result, {
         ok: true,
         id: commandId,
+        correlation_id: queued.context.request_id,
         data: { id: "message1" },
       });
       assert.equal(leaked, 0);

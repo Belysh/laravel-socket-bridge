@@ -138,6 +138,7 @@ integration(
     assert.deepEqual(await response, {
       ok: true,
       id: command.id,
+      correlation_id: command.context.request_id,
       data: { paid: true },
     });
     assert.equal(gateway.runtime.snapshot().pending_acks, 0);
@@ -171,7 +172,7 @@ integration(
       details: { fields: { order_id: ["The order is required."] } },
     };
     await result(command, { ok: false, error });
-    assert.deepEqual(await response, { ok: false, id, error });
+    assert.deepEqual(await response, { ok: false, id, error, correlation_id: command.context.request_id });
     socket.disconnect();
   },
 );
@@ -230,7 +231,7 @@ integration(
       message: "Different input for retained id.",
     };
     await result(next, { ok: false, error });
-    assert.deepEqual(await second, { ok: false, id, error });
+    assert.deepEqual(await second, { ok: false, id, error, correlation_id: next.context.request_id });
     assert.equal(gateway.runtime.snapshot().pending_acks, 0);
     socket.disconnect();
   },
@@ -265,7 +266,7 @@ integration(
     await sleep(25);
     assert.equal(finished, false);
     await result(current);
-    assert.deepEqual(await response, { ok: true, id, data: { paid: true } });
+    assert.deepEqual(await response, { ok: true, id, data: { paid: true }, correlation_id: current.context.request_id });
     assert.ok((await abandoned) instanceof Error);
     b.socket.disconnect();
   },

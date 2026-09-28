@@ -9446,7 +9446,9 @@ async function main() {
   if (!response.ok) throw new ProbeError("probe.ticket_rejected");
   const ticket = await response.json();
   if (typeof ticket.token !== "string" || !/^[a-f0-9]{64}$/.test(ticket.token)) throw new ProbeError("probe.invalid_ticket");
-  socket = lookup(gateway, {
+  const namespace = ticket.namespace ?? "/";
+  if (typeof namespace !== "string" || !/^\/[a-zA-Z0-9_/-]{0,99}$/.test(namespace)) throw new ProbeError("probe.invalid_ticket");
+  socket = lookup(`${gateway.replace(/\/$/, "")}${namespace === "/" ? "" : namespace}`, {
     transports: ["websocket"],
     autoConnect: false,
     reconnection: false,

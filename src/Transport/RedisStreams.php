@@ -29,7 +29,10 @@ class RedisStreams implements EnvelopeTransport
             throw new RuntimeException('Socket Bridge requires a configured standalone Redis connection.');
         }
         if (config('socket-bridge.redis_url')) {
-            $source['url'] = config('socket-bridge.redis_url');
+            // An explicit bridge URL is a complete endpoint, matching the Node
+            // gateway. Never inherit another application's password or database.
+            unset($source['scheme']);
+            $source = array_replace($source, ['host' => '127.0.0.1', 'port' => 6379, 'username' => null, 'password' => null, 'database' => 0, 'url' => config('socket-bridge.redis_url')]);
         }
         $source['prefix'] = '';
         $source['options'] = array_replace($source['options'] ?? [], ['prefix' => '']);

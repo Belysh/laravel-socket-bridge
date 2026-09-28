@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 export interface Config {
+  namespace: string; drainTimeoutMs: number; dedupTtlMs: number; dedupMaxEntries: number;
   metricsToken?: string; maxBufferedBytes: number; maxBufferedPackets: number;
   commandAckTimeoutMs: number; maxPendingCommandAcks: number; maxPendingCommandAcksTotal: number;
   prefix: string; secret: string; redisUrl: string; laravelUrl: string; authorizePath: string;
@@ -14,6 +15,8 @@ function integer(env: NodeJS.ProcessEnv, key: string, fallback: number, min: num
   return value;
 }
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+  const namespace = env.SOCKET_BRIDGE_NAMESPACE ?? '/';
+  if (!/^\/[a-zA-Z0-9_/-]*$/.test(namespace) || namespace.includes('..') || namespace.length > 100) throw new Error('Invalid SOCKET_BRIDGE_NAMESPACE');
   const metricsToken = env.SOCKET_BRIDGE_METRICS_TOKEN || undefined;
   if (metricsToken && metricsToken.length < 32) throw new Error('SOCKET_BRIDGE_METRICS_TOKEN must contain at least 32 characters');
   const prefix = env.SOCKET_BRIDGE_PREFIX ?? '';
@@ -38,6 +41,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const transports = (env.SOCKET_BRIDGE_TRANSPORTS ?? 'websocket').split(',').map(v => v.trim());
   if (!transports.length || transports.some(v => !['websocket', 'polling'].includes(v))) throw new Error('Invalid SOCKET_BRIDGE_TRANSPORTS');
   return {
+    namespace,
+    drainTimeoutMs: integer(env, 'SOCKET_BRIDGE_DRAIN_TIMEOUT_MS', 5000, 0, 300000),
+    dedupTtlMs: integer(env, 'SOCKET_BRIDGE_DEDUP_TTL_MS', 300000, 1000, 86400000),
+    dedupMaxEntries: integer(env, 'SOCKET_BRIDGE_DEDUP_MAX_ENTRIES', 256, 1, 10000),
     commandAckTimeoutMs: integer(env, 'SOCKET_BRIDGE_COMMAND_ACK_TIMEOUT_MS', 30_000, 100, 300_000),
     maxPendingCommandAcks: integer(env, 'SOCKET_BRIDGE_MAX_PENDING_COMMAND_ACKS', 32, 1, 1000),
     maxPendingCommandAcksTotal: integer(env, 'SOCKET_BRIDGE_MAX_PENDING_COMMAND_ACKS_TOTAL', 10_000, 1, 1_000_000),

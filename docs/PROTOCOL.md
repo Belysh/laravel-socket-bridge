@@ -45,7 +45,7 @@ A handler can return an array field map or an explicit `stdClass`; the root resu
 
 ## Tickets and identity
 
-`POST /socket-bridge/token` uses configurable Laravel middleware, default `web,auth`; the route prefix is configurable. Laravel returns `{token,expires_in,session_expires_at,url}`. The token is a random 32-byte hexadecimal value. Its SHA-256 key, `ticket:<hash>`, contains `{user_id,session_id,user_version,expires_at}` for at most 60 seconds by default, capped by session lifetime. `expires_at` describes the session, not ticket consumption time.
+`POST /socket-bridge/token` uses configurable Laravel middleware, default `web,auth`; the route prefix is configurable. Laravel returns `{token,expires_in,session_expires_at,url,namespace}`. The token is a random 32-byte hexadecimal value. Its SHA-256 key, `ticket:<hash>`, contains `{user_id,session_id,user_version,expires_at}` for at most 60 seconds by default, capped by session lifetime. `expires_at` describes the session, not ticket consumption time.
 
 A connection sends `handshake.auth.token`. The gateway consumes the ticket with `GETDEL`, then verifies current bridge session evidence and access version. Every connection attempt needs a fresh ticket; tickets never belong in URLs. Ticket TTL governs consumption, not the socket's eventual lifetime.
 
@@ -69,7 +69,7 @@ The client obtains a fresh ticket through the normal authenticated Laravel endpo
 
 An expired identity cannot be revived through refresh. The socket disconnects, and a new connection must authenticate again. Refresh never bypasses Laravel source evidence, access-version invalidation or channel policies.
 
-Before an intentional live-socket disconnect, the gateway emits `bridge.disconnect` with `{code,retryable}`. `session_expired`, `redis_unavailable` and `slow_client` are retryable; revoked/deleted identities and invalid user versions are terminal (`unauthenticated` or `session_revoked`). A slow reader may not receive the notification before transport closure. The application should retry recoverable server disconnects with bounded backoff and request a fresh ticket. Ordinary transport failures use Socket.IO reconnection. After a terminal failure, establish valid authentication before calling `socket.connect()` again.
+Before an intentional live-socket disconnect, the gateway emits `bridge.disconnect` with `{code,retryable}`. `session_expired`, `redis_unavailable`, `slow_client` and `server.draining` are retryable; revoked/deleted identities and invalid user versions are terminal (`unauthenticated` or `session_revoked`). A slow reader may not receive the notification before transport closure. The application should retry recoverable server disconnects with bounded backoff and request a fresh ticket. Ordinary transport failures use Socket.IO reconnection. After a terminal failure, establish valid authentication before calling `socket.connect()` again.
 
 ## Channel authorization and renewal
 
@@ -149,3 +149,9 @@ PHP command/outbox workers write `${prefix}:health:worker:<role>:<id>` with `pro
 ## Delivery contract
 
 See [Reliability](RELIABILITY.md) for transaction boundaries, command deduplication, retention, recovery and operational checks. Stream recovery does not guarantee browser delivery, global ordering, offline replay or exactly-once effects. Clients tolerate duplicates and refetch state after interruptions.
+
+## Namespaces and additive delivery fields
+
+`SOCKET_BRIDGE_NAMESPACE` defaults to `/`; `/v1` is supported for versioned applications. It is a Socket.IO namespace, not an Engine.IO `path`: leave the default `/socket.io/` transport path and connect to `url + namespace`. All replicas of one application must share the namespace. A configured non-root namespace rejects root-namespace clients. Tickets remain opaque, single-use values; changing the namespace does not turn them into JWTs.
+
+A `socket.emit` may include `expires_at` (positive integer Unix seconds) and `correlation_id` (safe ASCII identifier). Client event metadata includes those fields when present. Business-result ACKs include `correlation_id` for the command attempt. Protocol version remains 1: these are additive fields, and consumers must ignore unknown metadata.
