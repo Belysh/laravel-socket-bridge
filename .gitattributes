@@ -3,6 +3,7 @@
 /tests export-ignore
 /gateway/test export-ignore
 /.test-results export-ignore
+/storage export-ignore
 /composer.lock export-ignore
 /gateway export-ignore
 /scripts export-ignore

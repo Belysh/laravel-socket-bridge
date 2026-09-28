@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.2.1 — 2026-09-28
+
+- Make the explicit Redis URL compatibility test portable across Predis and PhpRedis response types.
+- Exclude standalone test logs from Composer release archives.
+
+Runtime behavior is unchanged from 2.2.0.
+
 ## 2.2.0 — 2026-09-28
 
 - Drain admitted command acknowledgements before shutdown, reject new work and expose not-ready immediately; configure the bounded drain deadline.

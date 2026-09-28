@@ -10,5 +10,6 @@
 !/examples/.env.example
 /.runtime/
 /.test-results/
+/storage/
 /tests/Fixtures/app/storage/
 .DS_Store

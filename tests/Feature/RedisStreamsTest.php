@@ -53,7 +53,7 @@ class RedisStreamsTest extends TestCase
     public function test_explicit_bridge_url_does_not_inherit_source_connection_credentials_or_database(): void
     {
         config(['database.redis.bridge-tests.username' => 'wrong-user', 'database.redis.bridge-tests.password' => 'wrong-password', 'database.redis.bridge-tests.database' => 11]);
-        self::assertSame('PONG', (string) $this->real->raw('PING'));
+        self::assertSame('bridge-url', $this->real->raw('PING', 'bridge-url'));
         $this->real->raw('SET', $this->prefix.':authority', 'bridge-url');
         $other = new RedisStreams($this->app);
         config(['database.redis.bridge-tests.username' => null, 'database.redis.bridge-tests.password' => null, 'database.redis.bridge-tests.database' => 0]);

@@ -63,6 +63,7 @@
     "exclude": [
       "/.github",
       "/.test-results",
+      "/storage",
       "/tests",
       "/gateway",
       "/scripts",

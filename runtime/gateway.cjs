@@ -114628,7 +114628,7 @@ var config_1 = require_config();
 var app_1 = require_app();
 async function main() {
   if (process.argv.includes("--version")) {
-    process.stdout.write("socket-bridge-gateway 2.2.0 protocol/1\n");
+    process.stdout.write("socket-bridge-gateway 2.2.1 protocol/1\n");
     return;
   }
   if (Number(process.versions.node.split(".")[0]) !== 24)
